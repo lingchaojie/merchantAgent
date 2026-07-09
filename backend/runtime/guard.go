@@ -33,9 +33,29 @@ func NewGuard(chk Checker, tenant string) *Guard { return &Guard{chk: chk, tenan
 
 func (g *Guard) obj(typ, id string) string { return fmt.Sprintf("%s:%s/%s", typ, g.tenant, id) }
 
+// CanViewDomain reports whether a user may view a sensitive data domain. Used to
+// build the prompt's boundary note (design §4.2 layer 5) so the model decides
+// deterministically instead of guessing from the role name — advisory only; the
+// authoritative check is still Authorize on every tool call.
+func (g *Guard) CanViewDomain(ctx context.Context, userID, domain string) (bool, error) {
+	return g.chk.Check(ctx, "user:"+userID, "viewer", g.obj("data_domain", domain))
+}
+
 // Authorize evaluates a tool spec + args for a principal.
 func (g *Guard) Authorize(ctx context.Context, p org.Principal, spec connector.ToolSpec, args map[string]any) (Decision, error) {
 	user := "user:" + p.UserID
+
+	// Capability authz (design §3.4): can the user invoke this tool at all? True
+	// iff they can USE some skill that exposes it (tool.invoker = usable_by from
+	// exposed_by). This is the skill-mediated capability wall, checked BEFORE any
+	// data authz so a role without the skill is denied up front.
+	okCap, err := g.chk.Check(ctx, user, "invoker", g.obj("tool", spec.Name))
+	if err != nil {
+		return Decision{}, err
+	}
+	if !okCap {
+		return Decision{false, "no skill grants tool " + spec.Name}, nil
+	}
 
 	// Record-level data authz: can the user view the specific resource?
 	if spec.ResourceType != "" && spec.ResourceArg != "" {

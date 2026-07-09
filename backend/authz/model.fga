@@ -47,12 +47,24 @@ type agent
     define can_use: [user, role#assignee, department#member] or member from tenant
     define can_view_audit: admin from tenant
 
-# tool / skill: capability authorization core.
+# skill: the capability unit (design §3). Authored in the skill registry
+# (playbook + allowed_tools); its AUTHORIZATION projection lands here as tuples —
+# which roles/users may use it (usable_by) and which tools it exposes
+# (tool.exposed_by). Same graph as data authz → no parallel hand table (§3.4).
+type skill
+  relations
+    define tenant: [tenant]
+    define usable_by: [user, role#assignee, department#member, department#manager]
+
+# tool: a callable capability. Reachability now flows THROUGH skills: a user may
+# invoke a tool iff they can use SOME skill that exposes it (§3.4). Tools are no
+# longer granted to roles directly.
 type tool
   relations
     define tenant: [tenant]
     define domain: [data_domain]
-    define invoker: [user, role#assignee, department#manager]
+    define exposed_by: [skill]
+    define invoker: usable_by from exposed_by
 
 # order: finest-grained data authz example for Phase 0.
 type order

@@ -5,7 +5,7 @@
 //
 // DEV-ONLY: the mock never ships — in the packaged app window.agent is always
 // present.
-import type { AgentAPI, Answer, Principal } from "../../shared/contract";
+import type { AgentAPI, ChatEvent, Principal } from "../../shared/contract";
 import { MOCK_USERS } from "./types";
 
 const ORDERS: Record<string, { customer: string; status: string; promise: string; cost: number; price: number }> = {
@@ -26,34 +26,46 @@ function route(q: string): { tool: string; orderId: string } | null {
   return null;
 }
 
-function mockAsk(userId: string, question: string): Answer {
+// mockChat mirrors the backend loop's event stream (tool_call → tool_result |
+// denied → final) so the browser preview shows live streaming without Go/OpenFGA.
+async function mockChat(userId: string, question: string, onEvent: (e: ChatEvent) => void): Promise<string> {
+  const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
   const r = route(question);
-  if (!r) return { text: "没听懂，请说明订单号与要查的内容（进度/齐套/利润）。" };
+  if (!r) {
+    const text = "没听懂，请说明订单号与要查的内容（进度/齐套/利润）。";
+    onEvent({ kind: "final", text });
+    return text;
+  }
+  await wait(200);
+  onEvent({ kind: "tool_call", tool: r.tool, data: { orderId: r.orderId } });
+  await wait(200);
   const o = ORDERS[r.orderId];
-  if (!o) return { text: `订单 ${r.orderId} 不存在。`, tool: r.tool };
-  const denied = (): Answer => ({ text: "抱歉，你没有权限查看该信息。", tool: r.tool, denied: true });
-
-  if (r.tool === "query_order_financials") {
-    if (!ORDER_VIEWERS.has(userId) || !COST_VIEWERS.has(userId)) return denied();
-    return {
-      text: `订单 ${r.orderId}：成本 ${o.cost}，售价 ${o.price}，利润 ${o.price - o.cost}。`,
-      tool: r.tool,
-      data: { orderId: r.orderId, cost: o.cost, price: o.price, profit: o.price - o.cost },
-    };
-  }
-  if (!ORDER_VIEWERS.has(userId)) return denied();
-  if (r.tool === "check_material_kitting") {
-    return {
-      text: `订单 ${r.orderId}：未齐套，欠料 M-螺栓 200。`,
-      tool: r.tool,
-      data: { orderId: r.orderId, complete: false, shortages: [{ material: "M-螺栓", short: 200 }] },
-    };
-  }
-  return {
-    text: `订单 ${r.orderId}（${o.customer}）：状态 ${o.status}，交期 ${o.promise}。`,
-    tool: r.tool,
-    data: { orderId: r.orderId, customer: o.customer, status: o.status, promiseDate: o.promise },
+  const finish = (text: string): string => {
+    onEvent({ kind: "final", text });
+    return text;
   };
+  if (!o) return finish(`订单 ${r.orderId} 不存在。`);
+
+  const canOrder = ORDER_VIEWERS.has(userId);
+  const canCost = COST_VIEWERS.has(userId);
+  if (r.tool === "query_order_financials") {
+    if (!canOrder || !canCost) {
+      onEvent({ kind: "denied", tool: r.tool });
+      return finish("抱歉，利润属于敏感数据，需要更高权限。");
+    }
+    onEvent({ kind: "tool_result", tool: r.tool, data: { orderId: r.orderId, cost: o.cost, price: o.price, profit: o.price - o.cost } });
+    return finish(`订单 ${r.orderId}：成本 ${o.cost}，售价 ${o.price}，利润 ${o.price - o.cost}。`);
+  }
+  if (!canOrder) {
+    onEvent({ kind: "denied", tool: r.tool });
+    return finish("抱歉，你没有权限查看该订单。");
+  }
+  if (r.tool === "check_material_kitting") {
+    onEvent({ kind: "tool_result", tool: r.tool, data: { orderId: r.orderId, complete: false, shortages: [{ material: "M-螺栓", short: 200 }] } });
+    return finish(`订单 ${r.orderId}：未齐套，欠料 M-螺栓 200。`);
+  }
+  onEvent({ kind: "tool_result", tool: r.tool, data: { orderId: r.orderId, customer: o.customer, status: o.status, promiseDate: o.promise } });
+  return finish(`订单 ${r.orderId}（${o.customer}）：状态 ${o.status}，交期 ${o.promise}。`);
 }
 
 const mockAgent: AgentAPI = {
@@ -61,9 +73,8 @@ const mockAgent: AgentAPI = {
     const u = MOCK_USERS.find((x) => x.id === userId);
     return { TenantID: "mock-corp-001", UserID: userId, DisplayName: u?.name ?? userId } as Principal;
   },
-  async ask(_tenantId, userId, question) {
-    await new Promise((r) => setTimeout(r, 280)); // simulate latency for the pending state
-    return mockAsk(userId, question);
+  chat(req, onEvent) {
+    return mockChat(req.userId, req.question, onEvent);
   },
   async readFile() {
     throw new Error("readFile unavailable in browser mock");

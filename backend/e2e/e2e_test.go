@@ -18,6 +18,7 @@ import (
 	"github.com/merchantagent/backend/connector/mockerp"
 	"github.com/merchantagent/backend/org"
 	"github.com/merchantagent/backend/runtime"
+	"github.com/merchantagent/backend/skill"
 	"github.com/merchantagent/backend/sync"
 )
 
@@ -56,6 +57,21 @@ func newAgent(t *testing.T) (*runtime.Agent, *runtime.AuditLog) {
 		{User: "department:" + obj("d_root") + "#manager", Relation: "viewer", Object: "data_domain:" + obj("cost")},
 	}}
 	if err := store.ApplyDiff(ctx, fx); err != nil {
+		t.Fatal(err)
+	}
+	// Capability: project the seeded skills into tuples so sales + manager roles
+	// can invoke the order tools. u_plan(planner) is in no skill → denied at the
+	// capability wall (design §3.4).
+	skStore, err := skill.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer skStore.Close()
+	skills, err := skStore.List(ctx, tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyDiff(ctx, sync.Diff{Writes: skill.Tuples(skills, tenant)}); err != nil {
 		t.Fatal(err)
 	}
 	erp, err := mockerp.Load(td("mock-erp.yaml"))

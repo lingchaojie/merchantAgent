@@ -28,6 +28,12 @@ type AuditEntry struct {
 	Hash     string         `json:"hash"`
 }
 
+// Appender records audit entries. *AuditLog (single chain) and *TenantAudit
+// (one chain per tenant) both satisfy it, so the runtime is agnostic.
+type Appender interface {
+	Append(AuditEntry) AuditEntry
+}
+
 // AuditLog is an in-memory hash-chained log (Phase 0; a real impl ships entries
 // to a SIEM/append-only store).
 type AuditLog struct {
@@ -37,6 +43,32 @@ type AuditLog struct {
 }
 
 func NewAuditLog() *AuditLog { return &AuditLog{} }
+
+// TenantAudit keeps one independent hash chain per tenant (design §7): a tenant
+// is the isolation + "boss reviews audit" boundary, so chains must not interleave.
+type TenantAudit struct {
+	mu     sync.Mutex
+	chains map[string]*AuditLog
+}
+
+func NewTenantAudit() *TenantAudit { return &TenantAudit{chains: map[string]*AuditLog{}} }
+
+// Chain returns (creating if needed) the log for a tenant.
+func (ta *TenantAudit) Chain(tenantID string) *AuditLog {
+	ta.mu.Lock()
+	defer ta.mu.Unlock()
+	lg, ok := ta.chains[tenantID]
+	if !ok {
+		lg = NewAuditLog()
+		ta.chains[tenantID] = lg
+	}
+	return lg
+}
+
+// Append routes an entry to its tenant's chain (by entry.TenantID).
+func (ta *TenantAudit) Append(e AuditEntry) AuditEntry {
+	return ta.Chain(e.TenantID).Append(e)
+}
 
 // Append records an entry, computing its hash over (prevHash + entry payload).
 func (a *AuditLog) Append(e AuditEntry) AuditEntry {

@@ -9,6 +9,10 @@ const TOOL_LABEL: Record<string, string> = {
   query_order_status: "订单进度",
   query_order_financials: "订单财务",
   check_material_kitting: "齐套检查",
+  query_customer_orders: "客户订单",
+  query_customer_contacts: "客户联系人",
+  query_customer_followups: "客户跟进",
+  query_customer_opportunities: "客户商机",
 };
 
 function TypingDots(): JSX.Element {
@@ -31,7 +35,10 @@ function MessageRow({ m }: { m: Message }): JSX.Element {
           {m.denied && <span className="tool-badge denied"><IconLock width={11} height={11} /> 权限拦截</span>}
         </div>
         {m.pending ? (
-          <TypingDots />
+          <div className="pending-row">
+            <TypingDots />
+            {m.status && <span className="status-line">{m.status}</span>}
+          </div>
         ) : (
           <div className={"bubble" + (m.denied ? " denied" : "")}>{m.text}</div>
         )}

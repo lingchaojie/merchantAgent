@@ -28,3 +28,8 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Local tool state / secrets (never commit)
+.claude/settings.local.json
+*.env
+dev.env

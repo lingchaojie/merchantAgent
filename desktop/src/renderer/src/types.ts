@@ -1,5 +1,5 @@
 // Renderer view-model types (distinct from the wire types in shared/contract).
-import type { Answer } from "../../shared/contract";
+import type { ChatEvent } from "../../shared/contract";
 
 export type Role = "user" | "assistant";
 
@@ -7,16 +7,18 @@ export interface Message {
   id: string;
   role: Role;
   text: string;
-  tool?: string; // which backend tool answered (badge)
-  data?: Record<string, unknown>; // structured result → rendered as a card
-  denied?: boolean; // permission refusal → lock treatment
+  tool?: string; // last backend tool used this turn (badge)
+  data?: Record<string, unknown>; // last structured result → rendered as a card
+  denied?: boolean; // a guard refusal occurred during the turn
   pending?: boolean; // in-flight (typing indicator)
+  status?: string; // live status line while streaming (e.g. "调用 订单进度…")
   ts: number;
 }
 
 export interface Thread {
   id: string;
   title: string;
+  sessionId: string; // server-side per-session history key
   messages: Message[];
   createdAt: number;
 }
@@ -36,14 +38,37 @@ export const MOCK_USERS: MockUser[] = [
   { id: "u_fin", name: "会计", roleLabel: "财务" },
 ];
 
-export function answerToMessage(a: Answer): Message {
-  return {
-    id: crypto.randomUUID(),
-    role: "assistant",
-    text: a.text,
-    tool: a.tool,
-    data: a.data,
-    denied: a.denied,
-    ts: Date.now(),
-  };
+// Human labels for the live status line as tools stream in.
+const TOOL_LABEL: Record<string, string> = {
+  load_skill: "加载技能",
+  query_order_status: "订单进度",
+  query_order_financials: "订单财务",
+  check_material_kitting: "齐套检查",
+  query_customer_orders: "客户订单",
+  query_customer_contacts: "客户联系人",
+  query_customer_followups: "客户跟进",
+  query_customer_opportunities: "客户商机",
+};
+
+// foldEvent folds one streamed ChatEvent into the in-flight assistant message.
+// tool_result data + tool name drive the ResultCard; final sets the text; a
+// denied event flags the turn (unless a later result supersedes the card).
+export function foldEvent(m: Message, e: ChatEvent): Message {
+  switch (e.kind) {
+    case "tool_call":
+      return { ...m, status: `调用 ${TOOL_LABEL[e.tool ?? ""] ?? e.tool ?? ""}…` };
+    case "skill_loaded":
+      return { ...m, status: `已加载技能 ${e.tool ?? ""}` };
+    case "tool_result":
+      return { ...m, tool: e.tool, data: e.data, denied: false, status: undefined };
+    case "denied":
+      return { ...m, denied: m.data ? m.denied : true, status: undefined };
+    case "assistant":
+      return e.text ? { ...m, text: e.text } : m;
+    case "final":
+    case "done":
+      return { ...m, text: e.text ?? m.text, pending: false, status: undefined };
+    default:
+      return m;
+  }
 }

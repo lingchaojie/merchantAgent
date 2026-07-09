@@ -39,23 +39,42 @@ func (f fakeChecker) Check(_ context.Context, u, r, o string) (bool, error) {
 }
 
 func TestGuard_Intersection(t *testing.T) {
-	// user can view the order but NOT the cost domain → financials denied.
+	// user can use a skill exposing both tools (invoker true) and can view the
+	// order, but NOT the cost domain → status allowed, financials denied.
 	chk := fakeChecker{allow: map[string]bool{
-		"user:u1|viewer|order:t/SO-1001": true,
+		"user:u1|invoker|tool:t/query_order_status":     true,
+		"user:u1|invoker|tool:t/query_order_financials": true,
+		"user:u1|viewer|order:t/SO-1001":                true,
 		// cost domain intentionally absent → false
 	}}
 	g := NewGuard(chk, "t")
 	p := org.Principal{TenantID: "t", UserID: "u1"}
 
-	status := connector.ToolSpec{ResourceType: "order", ResourceArg: "orderId"}
-	fin := connector.ToolSpec{ResourceType: "order", ResourceArg: "orderId", DataDomain: "cost"}
+	status := connector.ToolSpec{Name: "query_order_status", ResourceType: "order", ResourceArg: "orderId"}
+	fin := connector.ToolSpec{Name: "query_order_financials", ResourceType: "order", ResourceArg: "orderId", DataDomain: "cost"}
 	args := map[string]any{"orderId": "SO-1001"}
 
 	if d, _ := g.Authorize(context.Background(), p, status, args); !d.Allowed {
-		t.Error("status should be allowed (order viewer true)")
+		t.Error("status should be allowed (invoker + order viewer true)")
 	}
 	if d, _ := g.Authorize(context.Background(), p, fin, args); d.Allowed {
 		t.Error("financials must be denied (cost domain false)")
+	}
+}
+
+// TestGuard_CapabilityWall: no skill grants the tool → denied up front, even if
+// the user could view the record/domain (design §3.4).
+func TestGuard_CapabilityWall(t *testing.T) {
+	chk := fakeChecker{allow: map[string]bool{
+		"user:u1|viewer|order:t/SO-1001": true, // could see record…
+		// …but no invoker tuple → capability wall denies first
+	}}
+	g := NewGuard(chk, "t")
+	p := org.Principal{TenantID: "t", UserID: "u1"}
+	status := connector.ToolSpec{Name: "query_order_status", ResourceType: "order", ResourceArg: "orderId"}
+	d, _ := g.Authorize(context.Background(), p, status, map[string]any{"orderId": "SO-1001"})
+	if d.Allowed {
+		t.Error("must be denied: no skill grants the tool")
 	}
 }
 

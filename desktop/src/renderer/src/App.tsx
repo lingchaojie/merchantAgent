@@ -5,13 +5,19 @@ import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
 import { CommandPalette } from "./components/CommandPalette";
 import { getAgent } from "./agent";
-import { answerToMessage, type Thread, type Message } from "./types";
+import { foldEvent, type Thread, type Message } from "./types";
+import type { ChatEvent } from "../../shared/contract";
 
-const TENANT = "mock-corp-001";
 const agent = getAgent();
 
 function newThread(): Thread {
-  return { id: crypto.randomUUID(), title: "新会话", messages: [], createdAt: Date.now() };
+  return {
+    id: crypto.randomUUID(),
+    title: "新会话",
+    sessionId: crypto.randomUUID(),
+    messages: [],
+    createdAt: Date.now(),
+  };
 }
 
 export function App(): JSX.Element {
@@ -44,28 +50,41 @@ export function App(): JSX.Element {
   const send = useCallback(
     async (question: string) => {
       const userMsg: Message = { id: crypto.randomUUID(), role: "user", text: question, ts: Date.now() };
-      const pending: Message = { id: crypto.randomUUID(), role: "assistant", text: "", pending: true, ts: Date.now() };
+      const pendingId = crypto.randomUUID();
+      const pending: Message = { id: pendingId, role: "assistant", text: "", pending: true, ts: Date.now() };
+      const thread = threads.find((t) => t.id === activeId) ?? threads[0];
       patch(activeId, (t) => ({
         ...t,
         title: t.messages.length === 0 ? question.slice(0, 24) : t.title,
         messages: [...t.messages, userMsg, pending],
       }));
       setBusy(true);
+
+      // Fold each streamed event into the pending assistant message live.
+      const onEvent = (e: ChatEvent): void => {
+        patch(activeId, (t) => ({
+          ...t,
+          messages: t.messages.map((m) => (m.id === pendingId ? foldEvent(m, e) : m)),
+        }));
+      };
       try {
-        const ans = await agent.ask(TENANT, userId, question);
-        const msg = answerToMessage(ans);
-        patch(activeId, (t) => ({ ...t, messages: t.messages.map((m) => (m.id === pending.id ? msg : m)) }));
+        await agent.chat({ sessionId: thread.sessionId, userId, question }, onEvent);
       } catch (e) {
         const text = "错误：" + (e instanceof Error ? e.message : String(e));
         patch(activeId, (t) => ({
           ...t,
-          messages: t.messages.map((m) => (m.id === pending.id ? { ...m, text, pending: false, denied: true } : m)),
+          messages: t.messages.map((m) => (m.id === pendingId ? { ...m, text, pending: false, denied: true, status: undefined } : m)),
         }));
       } finally {
+        // Safety net: if no final/done arrived, clear the pending flag.
+        patch(activeId, (t) => ({
+          ...t,
+          messages: t.messages.map((m) => (m.id === pendingId && m.pending ? { ...m, pending: false, status: undefined } : m)),
+        }));
         setBusy(false);
       }
     },
-    [activeId, userId, patch],
+    [activeId, userId, patch, threads],
   );
 
   const createThread = useCallback(() => {
