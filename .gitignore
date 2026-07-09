@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+build/
+
+# Go
+*.exe
+*.test
+*.out
+/backend/bin/
+
+# TypeScript
+*.tsbuildinfo
+
+# Playwright / debug artifacts
+.playwright-mcp/
+/*.png
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

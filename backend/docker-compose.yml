@@ -1,0 +1,18 @@
+# Local OpenFGA for Phase 0. `docker compose up -d` then `go test ./...`.
+# Uses in-memory storage so the acceptance tests start from a clean slate.
+services:
+  openfga:
+    image: openfga/openfga:latest
+    command: run
+    ports:
+      - "18080:8080" # HTTP API (tests use this; uncommon host port avoids conflicts)
+      - "18081:8081" # gRPC
+      - "13000:3000" # playground
+    environment:
+      - OPENFGA_DATASTORE_ENGINE=memory
+      - OPENFGA_LOG_LEVEL=warn
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=:8081"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

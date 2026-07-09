@@ -1,0 +1,50 @@
+# Mock WeCom-style org for Phase 0 local development.
+# A real WeComAdapter would produce the same shape from the contact APIs.
+tenantId: mock-corp-001
+admins: [u_boss]
+
+departments:
+  - { deptId: d_root,  name: "示例贸易公司", parentId: "" }
+  - { deptId: d_sales, name: "销售部",       parentId: d_root }
+  - { deptId: d_prod,  name: "生产部",       parentId: d_root }
+  - { deptId: d_fin,   name: "财务部",       parentId: d_root }
+
+users:
+  - userId: u_boss
+    name: "老板"
+    positionText: "总经理"
+    status: active
+    deptIds: [d_root]
+    leaderInDeptIds: [d_root]     # manages the whole company (inherits down)
+    tagIds: []
+  - userId: u_sales1
+    name: "小销售"
+    positionText: "销售"
+    status: active
+    deptIds: [d_sales]
+    leaderInDeptIds: []
+    tagIds: [t_sales]
+  - userId: u_smgr
+    name: "销售经理"
+    positionText: "销售部经理"
+    status: active
+    deptIds: [d_sales]
+    leaderInDeptIds: [d_sales]    # manages the sales dept
+    tagIds: [t_sales]
+  - userId: u_plan
+    name: "计划员"
+    positionText: "生产计划员"
+    status: active
+    deptIds: [d_prod]
+    leaderInDeptIds: []
+    tagIds: []
+  - userId: u_fin
+    name: "会计"
+    positionText: "会计"
+    status: active
+    deptIds: [d_fin]
+    leaderInDeptIds: []
+    tagIds: []
+
+tags:
+  - { tagId: t_sales, name: "销售团队", memberUserIds: [u_sales1, u_smgr] }

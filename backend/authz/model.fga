@@ -1,0 +1,65 @@
+model
+  schema 1.1
+
+# subject = user:<open_userid> (WeCom global-stable id; mock uses its own ids)
+type user
+
+# tenant = WeCom corpid; everything is namespaced under a tenant so a Check can
+# never cross tenants.
+type tenant
+  relations
+    define admin: [user]
+    define member: [user]
+
+# department: hierarchy mirrored from the WeCom contact tree (parentid).
+type department
+  relations
+    define tenant: [tenant]
+    define parent: [department]
+    define direct_member: [user]
+    define leader: [user]
+    # membership does NOT inherit up/down — a member is a direct member only,
+    # so a parent-dept member can't see child-dept data.
+    define member: direct_member
+    # management DOES inherit downward: a parent-dept leader manages child depts,
+    # which is how "厂长看全厂 / 车间主管只看本车间" falls out for free.
+    define manager: leader or manager from parent
+
+# role: derived from dept + leader + tags, or an admin-confirmed mapping.
+type role
+  relations
+    define tenant: [tenant]
+    define assignee: [user, department#member, department#manager]
+
+# data_domain: the bridge between capability-authz and data-authz. A tool that
+# touches cost declares domain=cost; the Check requires BOTH tool#invoker AND
+# data_domain#viewer.
+type data_domain
+  relations
+    define tenant: [tenant]
+    define viewer: [user, role#assignee, department#manager]
+
+# agent: one general agent, usable by many roles; behavior differs by identity.
+type agent
+  relations
+    define tenant: [tenant]
+    define can_configure: admin from tenant
+    define can_use: [user, role#assignee, department#member] or member from tenant
+    define can_view_audit: admin from tenant
+
+# tool / skill: capability authorization core.
+type tool
+  relations
+    define tenant: [tenant]
+    define domain: [data_domain]
+    define invoker: [user, role#assignee, department#manager]
+
+# order: finest-grained data authz example for Phase 0.
+type order
+  relations
+    define tenant: [tenant]
+    define owner_dept: [department]
+    define owner: [user]
+    # visible to: the owner, members of the owning dept, or managers of the
+    # owning dept (incl. parent-dept managers via inheritance).
+    define viewer: owner or member from owner_dept or manager from owner_dept

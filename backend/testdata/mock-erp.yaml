@@ -1,0 +1,27 @@
+# Mock ERP data for Phase 0 scenario tools (T3 订单进度 / M2 齐套).
+# Served by the mock MCP server; a real connector (Kingdee/用友/…) replaces it.
+orders:
+  - orderId: SO-1001
+    ownerUserId: u_sales1
+    ownerDeptId: d_sales
+    customer: "A公司"
+    status: "生产中"
+    promiseDate: "2026-07-20"
+    cost: 82000       # sensitive: data_domain cost
+    price: 100000     # sensitive: data_domain pricing
+  - orderId: SO-1002
+    ownerUserId: u_sales1
+    ownerDeptId: d_sales
+    customer: "B公司"
+    status: "待排产"
+    promiseDate: "2026-07-25"
+    cost: 45000
+    price: 60000
+
+# Bill of materials + on-hand stock, for the 齐套/欠料 (kitting) scenario.
+boms:
+  SO-1001:
+    - { material: "M-钢板",  required: 100, onHand: 120 }
+    - { material: "M-螺栓",  required: 500, onHand: 300 }   # short 200
+  SO-1002:
+    - { material: "M-铝材",  required: 80,  onHand: 80 }
