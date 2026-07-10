@@ -40,10 +40,21 @@ func main() {
 	}
 	prov := provider.NewOpenAI(envOr("LLM_BASE_URL", "https://www.linx2.ai"), key, envOr("LLM_MODEL", "gpt-5.5"))
 
+	dataDir := envOr("DATA_DIR", "")
+	configDB, skillDB := os.Getenv("CONFIG_DB"), os.Getenv("SKILL_DB")
+	if configDB == "" && dataDir != "" {
+		configDB = dataDir + "/config.db"
+	}
+	if skillDB == "" && dataDir != "" {
+		skillDB = dataDir + "/skills.db"
+	}
+
 	asm, err := wire.Assemble(ctx, wire.Config{
 		OpenFGAURL: apiURL,
 		Tenant:     tenant,
 		OrgFile:    envOr("MOCK_ORG_FILE", "testdata/mock-org.yaml"),
+		ConfigDB:   configDB,
+		SkillDB:    skillDB,
 		Provider:   prov,
 	})
 	if err != nil {
@@ -67,6 +78,23 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("/chat", s.handleChat)
 	mux.HandleFunc("/chat/file-result", s.handleFileResult)
 	mux.HandleFunc("/audit", s.handleAudit)
+
+	admin := func(h http.HandlerFunc) http.HandlerFunc { return requireAdmin(s.asm.Store, s.tenant, h) }
+	mux.HandleFunc("GET /admin/tools", admin(s.handleTools))
+	mux.HandleFunc("GET /admin/roles", admin(s.handleRolesList))
+	mux.HandleFunc("POST /admin/roles", admin(s.handleRoleCreate))
+	mux.HandleFunc("PUT /admin/roles/{id}", admin(s.handleRoleUpdate))
+	mux.HandleFunc("DELETE /admin/roles/{id}", admin(s.handleRoleDelete))
+	mux.HandleFunc("GET /admin/rules", admin(s.handleRulesGet))
+	mux.HandleFunc("PUT /admin/rules", admin(s.handleRulesPut))
+	mux.HandleFunc("GET /admin/skills", admin(s.handleSkillsList))
+	mux.HandleFunc("GET /admin/templates", admin(s.handleTemplatesList))
+	mux.HandleFunc("POST /admin/skills", admin(s.handleSkillCreate))
+	mux.HandleFunc("PUT /admin/skills/{id}", admin(s.handleSkillUpdate))
+	mux.HandleFunc("DELETE /admin/skills/{id}", admin(s.handleSkillDelete))
+	mux.HandleFunc("GET /admin/domains", admin(s.handleDomainsList))
+	mux.HandleFunc("POST /admin/domains/{d}/grants", admin(s.handleGrantAdd))
+	mux.HandleFunc("DELETE /admin/domains/{d}/grants", admin(s.handleGrantRemove))
 	return mux
 }
 

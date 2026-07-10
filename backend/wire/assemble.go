@@ -34,11 +34,12 @@ type Assembled struct {
 	Audit     *runtime.TenantAudit
 	Store     *authz.Store
 	Projector *Projector
+	Cfg       *config.Store
+	Sk        *skill.Store
+	Conns     []connector.Connector // ERP + CRM, for the tool catalog
 
 	erp *erp.ERP
 	crm *crm.CRM
-	sk  *skill.Store
-	cfg *config.Store
 }
 
 // Assemble builds everything: OpenFGA store, ERP/CRM connectors, skill + config
@@ -93,15 +94,15 @@ func Assemble(ctx context.Context, cfg Config) (*Assembled, error) {
 	agent := runtime.NewLLMAgent(cfg.Provider, conns, runtime.NewGuard(store, cfg.Tenant), resolver, audit, cfg.Tenant).
 		WithAmbient(localfile.Tools()...) // local files via the desktop reverse bridge
 
-	return &Assembled{Agent: agent, IDP: idp, Audit: audit, Store: store, Projector: projector, erp: e, crm: c, sk: sk, cfg: cf}, nil
+	return &Assembled{Agent: agent, IDP: idp, Audit: audit, Store: store, Projector: projector, Cfg: cf, Sk: sk, Conns: conns, erp: e, crm: c}, nil
 }
 
 // Close releases the connector, skill, and config stores.
 func (a *Assembled) Close() {
 	a.erp.Close()
 	a.crm.Close()
-	a.sk.Close()
-	a.cfg.Close()
+	a.Sk.Close()
+	a.Cfg.Close()
 }
 
 func openSkill(path string) (*skill.Store, error) {
