@@ -5,7 +5,7 @@
 //
 // DEV-ONLY: the mock never ships — in the packaged app window.agent is always
 // present.
-import type { AgentAPI, ChatEvent, Principal } from "../../shared/contract";
+import type { AdminReq, AdminResp, AgentAPI, ChatEvent, Principal } from "../../shared/contract";
 import { MOCK_USERS } from "./types";
 
 const ORDERS: Record<string, { customer: string; status: string; promise: string; cost: number; price: number }> = {
@@ -68,6 +68,48 @@ async function mockChat(userId: string, question: string, onEvent: (e: ChatEvent
   return finish(`订单 ${r.orderId}（${o.customer}）：状态 ${o.status}，交期 ${o.promise}。`);
 }
 
+// Who counts as an admin in the mock (mirrors backend requireAdmin: managers +
+// boss). Non-admins get a 403 so the "admin only" gate is visible in the preview.
+const ADMINS = new Set(["u_smgr", "u_boss"]);
+
+// mockAdmin fakes agentd's /admin/* API for the browser preview: canned data for
+// GETs, and {ok:true} for mutations (nothing is persisted). Non-admin callers get
+// a 403 AdminResp, matching the real requireAdmin behavior.
+function mockAdmin(req: AdminReq): AdminResp {
+  if (!ADMINS.has(req.userId)) return { ok: false, status: 403, error: "admin only" };
+  const seed: Record<string, unknown> = {
+    "/admin/tools": [
+      { name: "query_order_status", description: "查询订单进度/交期", dataDomain: "orders" },
+      { name: "check_material_kitting", description: "查询齐套/欠料", dataDomain: "orders" },
+      { name: "query_order_financials", description: "查询订单成本/利润", dataDomain: "cost" },
+    ],
+    "/admin/roles": [
+      { roleId: "sales", label: "销售", description: "销售员" },
+      { roleId: "sales_mgr", label: "销售经理", description: "销售部门管理者" },
+      { roleId: "finance", label: "财务", description: "财务人员" },
+      { roleId: "boss", label: "老板", description: "全部权限" },
+    ],
+    "/admin/rules": [
+      { match: ["利润", "成本", "毛利"], roleId: "finance" },
+      { match: ["进度", "交期", "齐套"], roleId: "sales" },
+    ],
+    "/admin/skills": [],
+    "/admin/templates": [],
+    "/admin/domains": {
+      domains: [
+        { domainId: "orders", label: "订单" },
+        { domainId: "cost", label: "成本" },
+      ],
+      grants: [
+        { domainId: "orders", subject: "role:sales" },
+        { domainId: "cost", subject: "role:finance" },
+      ],
+    },
+  };
+  if (req.method === "GET") return { ok: true, data: seed[req.path] ?? [] };
+  return { ok: true, data: undefined }; // mutations: accepted, not persisted
+}
+
 const mockAgent: AgentAPI = {
   async login(userId) {
     const u = MOCK_USERS.find((x) => x.id === userId);
@@ -81,6 +123,9 @@ const mockAgent: AgentAPI = {
   },
   async writeFile() {
     throw new Error("writeFile unavailable in browser mock");
+  },
+  async admin(req) {
+    return mockAdmin(req);
   },
 };
 

@@ -24,6 +24,8 @@ const api: AgentAPI = {
   readFile: (rel) => ipcRenderer.invoke(Channels.fsRead, { rel }),
   writeFile: (rel, contents, confirmed) =>
     ipcRenderer.invoke(Channels.fsWrite, { rel, contents, confirmed }),
+
+  admin: (req) => ipcRenderer.invoke(Channels.admin, req),
 };
 
 contextBridge.exposeInMainWorld("agent", api);

@@ -40,6 +40,17 @@ export interface ChatReq {
   question: string;
 }
 
+/** Generic admin request — proxied to agentd's /admin/* with X-User-Id injected. */
+export interface AdminReq {
+  method: "GET" | "POST" | "PUT" | "DELETE";
+  path: string; // e.g. "/admin/roles" or "/admin/skills/order360"
+  userId: string; // current identity → injected as X-User-Id by main
+  body?: unknown;
+}
+export type AdminResp =
+  | { ok: true; data: unknown }
+  | { ok: false; status: number; error: string };
+
 /** The API surface exposed to the renderer via contextBridge (window.agent). */
 export interface AgentAPI {
   login(userId: string): Promise<Principal>;
@@ -47,6 +58,7 @@ export interface AgentAPI {
   chat(req: ChatReq, onEvent: (e: ChatEvent) => void): Promise<string>;
   readFile(rel: string): Promise<string>;
   writeFile(rel: string, contents: string, confirmed: boolean): Promise<string>;
+  admin(req: AdminReq): Promise<AdminResp>;
 }
 
 /** IPC channel names — one place, referenced by main + preload. */
@@ -56,6 +68,7 @@ export const Channels = {
   chatEventPrefix: "agent:chat:event:", // + streamId (main→renderer stream)
   fsRead: "fs:read",
   fsWrite: "fs:write",
+  admin: "agent:admin",
 } as const;
 
 // Request payload shapes (what preload sends, what main handlers receive).

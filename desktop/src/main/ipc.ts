@@ -12,6 +12,8 @@ import {
   type LoginReq,
   type FsReadReq,
   type FsWriteReq,
+  type AdminReq,
+  type AdminResp,
 } from "../shared/contract";
 
 // handleFileRequest executes a backend file_request on the client via fsguard.
@@ -67,4 +69,12 @@ export function register(sandbox: Sandbox): void {
   ipcMain.handle(Channels.fsWrite, (_e, req: FsWriteReq) =>
     sandbox.write(req.rel, req.contents, !!req.confirmed),
   );
+
+  // admin: generic proxy to agentd's /admin/* API. X-User-Id is injected in
+  // agentd.adminRequest; the backend's requireAdmin gate authorizes. Errors are
+  // returned as a typed AdminResp (never thrown across the bridge).
+  ipcMain.handle(Channels.admin, async (_e, req: AdminReq): Promise<AdminResp> => {
+    const r = await client.adminRequest(req);
+    return r.ok ? { ok: true, data: r.data } : { ok: false, status: r.status, error: r.error ?? "error" };
+  });
 }

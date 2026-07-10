@@ -94,10 +94,33 @@ export function parseSSE(block: string): ChatEvent | null {
   return { ...(payload as object), kind } as ChatEvent;
 }
 
+// adminRequest proxies a renderer admin call to agentd's /admin/* API, injecting
+// the caller's identity as X-User-Id (requireAdmin gates on the backend). Returns
+// a discriminated result: parsed JSON on 2xx, or {ok:false,status,error} otherwise.
+async function adminRequest(req: {
+  method: string; path: string; userId: string; body?: unknown;
+}): Promise<{ ok: boolean; status: number; data?: unknown; error?: string }> {
+  const res = await fetch(BASE + req.path, {
+    method: req.method,
+    headers: { "content-type": "application/json", "x-user-id": req.userId },
+    body: req.body !== undefined ? JSON.stringify(req.body) : undefined,
+  });
+  const text = await res.text();
+  let parsed: unknown = undefined;
+  try { parsed = text ? JSON.parse(text) : undefined; } catch { /* non-json */ }
+  if (!res.ok) {
+    const error = (parsed && typeof parsed === "object" && "error" in parsed)
+      ? String((parsed as { error: unknown }).error) : text;
+    return { ok: false, status: res.status, error };
+  }
+  return { ok: true, status: res.status, data: parsed };
+}
+
 export const client = {
   base: BASE,
   login: (userId: string) => post<Principal>("/login", { userId }),
   chat,
+  adminRequest,
 };
 
 // spawnAgentd optionally launches the Go binary; returns the child (or null if
