@@ -1,0 +1,20 @@
+# Normalize line endings: store and check out source as LF, even on Windows
+# (core.autocrlf=true here). Without this, the CRLF working tree makes
+# `gofmt -l` report false positives on otherwise-clean Go files.
+* text=auto eol=lf
+
+*.go   text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.sql  text eol=lf
+*.css  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+
+# Binary assets — never touch.
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
