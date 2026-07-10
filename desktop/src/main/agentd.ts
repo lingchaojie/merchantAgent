@@ -100,12 +100,19 @@ export function parseSSE(block: string): ChatEvent | null {
 async function adminRequest(req: {
   method: string; path: string; userId: string; body?: unknown;
 }): Promise<{ ok: boolean; status: number; data?: unknown; error?: string }> {
-  const res = await fetch(BASE + req.path, {
-    method: req.method,
-    headers: { "content-type": "application/json", "x-user-id": req.userId },
-    body: req.body !== undefined ? JSON.stringify(req.body) : undefined,
-  });
-  const text = await res.text();
+  let res: Response;
+  try {
+    res = await fetch(BASE + req.path, {
+      method: req.method,
+      headers: { "content-type": "application/json", "x-user-id": req.userId },
+      body: req.body !== undefined ? JSON.stringify(req.body) : undefined,
+    });
+  } catch (e) {
+    // Network failure (agentd down, or WSL IPv6 localhost-relay flakiness). Return
+    // a typed error so it crosses the IPC bridge as an AdminResp, never a throw.
+    return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
+  }
+  const text = await res.text().catch(() => "");
   let parsed: unknown = undefined;
   try { parsed = text ? JSON.parse(text) : undefined; } catch { /* non-json */ }
   if (!res.ok) {

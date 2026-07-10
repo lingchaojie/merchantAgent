@@ -75,6 +75,6 @@ export function register(sandbox: Sandbox): void {
   // returned as a typed AdminResp (never thrown across the bridge).
   ipcMain.handle(Channels.admin, async (_e, req: AdminReq): Promise<AdminResp> => {
     const r = await client.adminRequest(req);
-    return r.ok ? { ok: true, data: r.data } : { ok: false, status: r.status, error: r.error ?? "error" };
+    return r.ok ? { ok: true, data: r.data } : { ok: false, status: r.status, error: r.error || "error" };
   });
 }
