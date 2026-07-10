@@ -4,7 +4,7 @@
 -- skill.Tuples — same "single source → tuples" pattern as org sync (§3.4).
 
 -- Platform starter templates (global, read-only conceptually; FSE/we maintain).
-CREATE TABLE templates (
+CREATE TABLE IF NOT EXISTS templates (
   template_id     TEXT PRIMARY KEY,
   name            TEXT NOT NULL,
   description     TEXT NOT NULL,
@@ -15,7 +15,7 @@ CREATE TABLE templates (
 );
 
 -- Tenant skills (cloned from a template, then edited by the tenant admin).
-CREATE TABLE skills (
+CREATE TABLE IF NOT EXISTS skills (
   tenant_id          TEXT NOT NULL,
   skill_id           TEXT NOT NULL,
   name               TEXT NOT NULL,

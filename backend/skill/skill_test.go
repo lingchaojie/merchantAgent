@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -61,5 +62,98 @@ func TestTuples_Projection(t *testing.T) {
 		if strings.Contains(tp.Object, "data_domain") || strings.Contains(tp.User, "data_domain") {
 			t.Errorf("data_domain must not be projected, got %s", tp.String())
 		}
+	}
+}
+
+func TestSkillCRUD_AndClone(t *testing.T) {
+	ctx := context.Background()
+	s, _ := Open()
+	defer s.Close()
+
+	tmpls, err := s.ListTemplates(ctx)
+	if err != nil || len(tmpls) != 1 || tmpls[0].TemplateID != "order-360" {
+		t.Fatalf("templates = %+v err=%v", tmpls, err)
+	}
+	// Clone the platform template into a new tenant skill.
+	id, err := s.CloneTemplate(ctx, "mock-corp-001", "order-360")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skills, _ := s.List(ctx, "mock-corp-001")
+	if len(skills) != 3 {
+		t.Fatalf("skills = %d, want 3 after clone", len(skills))
+	}
+	// Update the clone's roles (Gate A) + playbook.
+	err = s.Update(ctx, Skill{
+		TenantID: "mock-corp-001", SkillID: id, Name: "订单360副本",
+		Description: "d", PlaybookMD: "p", AllowedTools: []string{"query_order_status"},
+		DataDomains: []string{"cost"}, Roles: []string{"sales"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Delete it.
+	if err := s.Delete(ctx, "mock-corp-001", id); err != nil {
+		t.Fatal(err)
+	}
+	skills, _ = s.List(ctx, "mock-corp-001")
+	if len(skills) != 2 {
+		t.Fatalf("skills = %d, want 2 after delete", len(skills))
+	}
+}
+
+func TestRemoveRoleFromSkills(t *testing.T) {
+	ctx := context.Background()
+	s, _ := Open()
+	defer s.Close()
+	// order360 seeds roles [sales, manager_tier]; drop sales.
+	if err := s.RemoveRoleFromAll(ctx, "mock-corp-001", "sales"); err != nil {
+		t.Fatal(err)
+	}
+	skills, _ := s.List(ctx, "mock-corp-001")
+	for _, sk := range skills {
+		for _, r := range sk.Roles {
+			if r == "sales" {
+				t.Errorf("skill %s still has role sales", sk.SkillID)
+			}
+		}
+	}
+}
+
+// TestOpenFile_SeedGuardSurvivesEmptySkills proves OpenFile guards on templates,
+// not skills: after an admin deletes every seeded skill, re-opening the same
+// file must not re-run seed.sql (which would crash on the templates UNIQUE
+// constraint) and must not resurrect the deleted skills.
+func TestOpenFile_SeedGuardSurvivesEmptySkills(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "skills.db")
+
+	s, err := OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Delete both seeded skills.
+	if err := s.Delete(ctx, "mock-corp-001", "order360"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, "mock-corp-001", "customer360"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-open: must NOT error (no re-seed → no UNIQUE crash) and must NOT re-seed.
+	s2, err := OpenFile(path)
+	if err != nil {
+		t.Fatalf("re-open after emptying skills errored (re-seed crash?): %v", err)
+	}
+	defer s2.Close()
+	skills, err := s2.List(ctx, "mock-corp-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 0 {
+		t.Fatalf("skills = %d, want 0 (deleted skills must not be re-seeded)", len(skills))
 	}
 }

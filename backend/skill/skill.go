@@ -67,6 +67,36 @@ func Open() (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// OpenFile opens/creates a file-backed skill registry, seeding only a fresh DB
+// so admin edits survive restart. Mirrors config.OpenFile.
+func OpenFile(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open skill sqlite: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(schemaSQL); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("skill schema: %w", err)
+	}
+	// Guard on templates, not skills: templates is populated only by seed and
+	// has no CRUD, so it's a stable sentinel. Guarding on skills would re-run
+	// seed.sql after an admin deletes every skill and crash on the templates
+	// UNIQUE constraint.
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM templates`).Scan(&n); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if n == 0 {
+		if _, err := db.Exec(seedSQL); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("skill seed: %w", err)
+		}
+	}
+	return &Store{db: db}, nil
+}
+
 func (s *Store) Close() error { return s.db.Close() }
 
 // List returns all skills for a tenant.
@@ -104,4 +134,143 @@ func jsonArr(s string, dst *[]string) error {
 		return nil
 	}
 	return json.Unmarshal([]byte(s), dst)
+}
+
+func writeSkill(ctx context.Context, db *sql.DB, sk Skill, insert bool) error {
+	tools, _ := json.Marshal(sk.AllowedTools)
+	domains, _ := json.Marshal(sk.DataDomains)
+	roles, _ := json.Marshal(sk.Roles)
+	if insert {
+		_, err := db.ExecContext(ctx,
+			`INSERT INTO skills (tenant_id, skill_id, name, description, playbook_md, allowed_tools, data_domains, roles, source_template_id)
+			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			sk.TenantID, sk.SkillID, sk.Name, sk.Description, sk.PlaybookMD,
+			string(tools), string(domains), string(roles), nullable(sk.SourceTemplate))
+		return err
+	}
+	res, err := db.ExecContext(ctx,
+		`UPDATE skills SET name=?, description=?, playbook_md=?, allowed_tools=?, data_domains=?, roles=?
+		 WHERE tenant_id=? AND skill_id=?`,
+		sk.Name, sk.Description, sk.PlaybookMD, string(tools), string(domains), string(roles),
+		sk.TenantID, sk.SkillID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("skill %q not found", sk.SkillID)
+	}
+	return nil
+}
+
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func (s *Store) Create(ctx context.Context, sk Skill) error {
+	if sk.SkillID == "" || sk.Name == "" {
+		return fmt.Errorf("skill id and name required")
+	}
+	return writeSkill(ctx, s.db, sk, true)
+}
+
+func (s *Store) Update(ctx context.Context, sk Skill) error { return writeSkill(ctx, s.db, sk, false) }
+
+func (s *Store) Delete(ctx context.Context, tenant, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM skills WHERE tenant_id=? AND skill_id=?`, tenant, id)
+	return err
+}
+
+// RemoveRoleFromAll strips a role id from every skill's roles list (cascade on
+// role delete, so no skill references a dead role → no stale usable_by tuple).
+func (s *Store) RemoveRoleFromAll(ctx context.Context, tenant, roleID string) error {
+	skills, err := s.List(ctx, tenant)
+	if err != nil {
+		return err
+	}
+	for _, sk := range skills {
+		filtered := sk.Roles[:0:0]
+		changed := false
+		for _, r := range sk.Roles {
+			if r == roleID {
+				changed = true
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		if changed {
+			sk.Roles = filtered
+			if err := writeSkill(ctx, s.db, sk, false); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ListTemplates returns the platform starter templates.
+func (s *Store) ListTemplates(ctx context.Context) ([]Template, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT template_id, name, description, playbook_md, allowed_tools, data_domains, suggested_roles FROM templates ORDER BY template_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Template{}
+	for rows.Next() {
+		var t Template
+		var tools, domains, roles string
+		if err := rows.Scan(&t.TemplateID, &t.Name, &t.Description, &t.PlaybookMD, &tools, &domains, &roles); err != nil {
+			return nil, err
+		}
+		jsonArr(tools, &t.AllowedTools)
+		jsonArr(domains, &t.DataDomains)
+		jsonArr(roles, &t.SuggestedRoles)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// CloneTemplate creates a tenant skill from a platform template, decoupled from
+// it thereafter (design §3.5). Returns the new skill id: templateId, or
+// templateId + "-N" if that id is already taken.
+func (s *Store) CloneTemplate(ctx context.Context, tenant, templateID string) (string, error) {
+	tmpls, err := s.ListTemplates(ctx)
+	if err != nil {
+		return "", err
+	}
+	var t *Template
+	for i := range tmpls {
+		if tmpls[i].TemplateID == templateID {
+			t = &tmpls[i]
+			break
+		}
+	}
+	if t == nil {
+		return "", fmt.Errorf("template %q not found", templateID)
+	}
+	id := uniqueSkillID(ctx, s.db, tenant, templateID)
+	sk := Skill{
+		TenantID: tenant, SkillID: id, Name: t.Name, Description: t.Description,
+		PlaybookMD: t.PlaybookMD, AllowedTools: t.AllowedTools, DataDomains: t.DataDomains,
+		Roles: t.SuggestedRoles, SourceTemplate: t.TemplateID,
+	}
+	if err := writeSkill(ctx, s.db, sk, true); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func uniqueSkillID(ctx context.Context, db *sql.DB, tenant, base string) string {
+	try := base
+	for i := 1; ; i++ {
+		var n int
+		db.QueryRowContext(ctx, `SELECT COUNT(*) FROM skills WHERE tenant_id=? AND skill_id=?`, tenant, try).Scan(&n)
+		if n == 0 {
+			return try
+		}
+		try = fmt.Sprintf("%s-%d", base, i)
+	}
 }
