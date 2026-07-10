@@ -74,8 +74,14 @@ func open(dsn, tenant string, alwaysSeed bool) (*Store, error) {
 	s := &Store{db: db, tenant: tenant}
 	seed := alwaysSeed
 	if !seed {
+		// Guard on data_domains, not roles: admins can delete every role (see
+		// DeleteRole), so an empty roles table is a legitimate post-edit state,
+		// not a fresh DB — re-seeding then would UNIQUE-crash on the still-
+		// populated data_domains/domain_grants. data_domains has no admin CRUD
+		// (only its grants are editable, never the domain rows), so it's a stable
+		// seed-only sentinel that's never emptied.
 		var n int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM roles WHERE tenant_id = ?`, tenant).Scan(&n); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM data_domains WHERE tenant_id = ?`, tenant).Scan(&n); err != nil {
 			db.Close()
 			return nil, err
 		}

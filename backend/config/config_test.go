@@ -125,3 +125,30 @@ func TestOpenFile_SeedGuardPersists(t *testing.T) {
 		t.Fatalf("reopened roles = %d, want 6 (edit survived, no re-seed)", len(roles))
 	}
 }
+
+func TestOpenFile_SeedGuardSurvivesEmptyRoles(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "config.db")
+	s1, err := OpenFile(path, "mock-corp-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Admin empties all roles (each DeleteRole cascades its rules+grants).
+	roles, _ := s1.Roles(ctx)
+	for _, r := range roles {
+		if err := s1.DeleteRole(ctx, r.RoleID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s1.Close()
+	// Reopen must NOT crash on re-seed and must NOT resurrect roles.
+	s2, err := OpenFile(path, "mock-corp-001")
+	if err != nil {
+		t.Fatalf("reopen after emptying roles: %v", err)
+	}
+	defer s2.Close()
+	roles, _ = s2.Roles(ctx)
+	if len(roles) != 0 {
+		t.Fatalf("roles = %d, want 0 (no re-seed after admin emptied them)", len(roles))
+	}
+}
