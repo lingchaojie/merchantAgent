@@ -31,7 +31,7 @@ function createWindow(): void {
       responseHeaders: {
         ...details.responseHeaders,
         "Content-Security-Policy": [
-          "default-src 'self'; connect-src 'self' http://127.0.0.1:8765; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+          "default-src 'self'; connect-src 'self' http://localhost:8765 http://127.0.0.1:8765; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
         ],
       },
     });

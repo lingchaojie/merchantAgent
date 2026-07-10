@@ -36,6 +36,7 @@
     "appId": "com.merchantagent.desktop",
     "productName": "merchantAgent",
     "files": ["out/**"],
+    "npmRebuild": false,
     "win": { "target": ["nsis"] },
     "mac": { "target": ["dmg"] },
     "linux": { "target": ["AppImage"] }

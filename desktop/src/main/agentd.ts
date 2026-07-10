@@ -4,7 +4,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { ChatEvent, ChatReq, Principal } from "../shared/contract";
 
-const BASE = process.env.AGENTD_URL || "http://127.0.0.1:8765";
+// Use "localhost" (not the 127.0.0.1 IPv4 literal): when agentd runs in WSL2,
+// Windows' localhost relay is often IPv6-only (::1), and Node's fetch
+// (autoSelectFamily) will pick the family that connects. Resolves to 127.0.0.1
+// for a native-Windows agentd too, so this is strictly more portable.
+const BASE = process.env.AGENTD_URL || "http://localhost:8765";
 
 async function post<T>(pathname: string, body: unknown): Promise<T> {
   const res = await fetch(BASE + pathname, {
