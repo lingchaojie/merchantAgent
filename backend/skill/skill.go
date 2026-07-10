@@ -12,6 +12,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -169,11 +170,35 @@ func nullable(s string) any {
 	return s
 }
 
+// Create inserts a skill. The skill id must pass validID: it is embedded into the
+// OpenFGA object string "skill:<tenant>/<skillId>", and OpenFGA rejects object ids
+// containing whitespace, ':' or '#'. Without this guard a bad id would COMMIT here,
+// then fail every Tuples/Reproject; boot-time Reproject failure is fatal (main.go
+// log.Fatalf), so a persisted bad id bricks the next agentd restart.
 func (s *Store) Create(ctx context.Context, sk Skill) error {
 	if sk.SkillID == "" || sk.Name == "" {
 		return fmt.Errorf("skill id and name required")
 	}
+	if !validID(sk.SkillID) {
+		return fmt.Errorf("invalid skill id %q: no spaces, ':' or '#'", sk.SkillID)
+	}
 	return writeSkill(ctx, s.db, sk, true)
+}
+
+// validID reports whether s is usable as the id component of an OpenFGA object
+// string ("skill:<tenant>/<id>"). It rejects an empty id or one containing
+// whitespace, ':' or '#' — the characters that would break the type:id object
+// form or fail OpenFGA's object-id validation. Structural only, no whitelist.
+func validID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r == ':' || r == '#' || unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) Update(ctx context.Context, sk Skill) error { return writeSkill(ctx, s.db, sk, false) }

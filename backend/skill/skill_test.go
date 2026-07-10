@@ -120,6 +120,38 @@ func TestRemoveRoleFromSkills(t *testing.T) {
 	}
 }
 
+func TestCreate_RejectsMalformedID(t *testing.T) {
+	ctx := context.Background()
+	s, _ := Open()
+	defer s.Close()
+
+	before, _ := s.List(ctx, "mock-corp-001")
+	// An id embedded into "skill:<tenant>/<id>" must not contain whitespace, ':'
+	// or '#'; a persisted bad id would fail every (boot-time, fatal) Reproject.
+	for _, bad := range []string{"bad id", "skill:x", "skill#x"} {
+		if err := s.Create(ctx, Skill{SkillID: bad, Name: "x"}); err == nil {
+			t.Fatalf("Create(%q) returned nil error", bad)
+		}
+	}
+	after, _ := s.List(ctx, "mock-corp-001")
+	if len(after) != len(before) {
+		t.Fatalf("malformed skill persisted: skills %d → %d", len(before), len(after))
+	}
+	// A clean id still succeeds.
+	if err := s.Create(ctx, Skill{TenantID: "mock-corp-001", SkillID: "returns360", Name: "退货360"}); err != nil {
+		t.Fatalf("valid Create errored: %v", err)
+	}
+	after, _ = s.List(ctx, "mock-corp-001")
+	if len(after) != len(before)+1 {
+		t.Fatalf("valid skill not persisted: skills %d → %d", len(before), len(after))
+	}
+	// CloneTemplate derives ids from a seed-controlled templateId (safe), so a
+	// normal clone still works with no id guard needed there.
+	if _, err := s.CloneTemplate(ctx, "mock-corp-001", "order-360"); err != nil {
+		t.Fatalf("CloneTemplate errored: %v", err)
+	}
+}
+
 // TestOpenFile_SeedGuardSurvivesEmptySkills proves OpenFile guards on templates,
 // not skills: after an admin deletes every seeded skill, re-opening the same
 // file must not re-run seed.sql (which would crash on the templates UNIQUE

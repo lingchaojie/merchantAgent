@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -118,9 +119,18 @@ func (s *Store) Roles(ctx context.Context) ([]Role, error) {
 	return out, rows.Err()
 }
 
+// CreateRole inserts a role. The role id must pass validID: it is embedded into
+// the OpenFGA object string "role:<tenant>/<roleId>", and OpenFGA rejects object
+// ids containing whitespace, ':' or '#'. Without this guard a bad id would COMMIT
+// here, then fail every Reproject; boot-time Reproject failure is fatal (main.go
+// log.Fatalf), so a persisted bad id bricks the next agentd restart — the same
+// rationale as validSubject on grants.
 func (s *Store) CreateRole(ctx context.Context, r Role) error {
 	if r.RoleID == "" || r.Label == "" {
 		return fmt.Errorf("role id and label required")
+	}
+	if !validID(r.RoleID) {
+		return fmt.Errorf("invalid role id %q: no spaces, ':' or '#'", r.RoleID)
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO roles (tenant_id, role_id, label, description) VALUES (?,?,?,?)`,
@@ -271,6 +281,22 @@ func validSubject(subject string) error {
 		return fmt.Errorf("invalid subject %q: want type:id[#relation]", subject)
 	}
 	return nil
+}
+
+// validID reports whether s is usable as the id component of an OpenFGA object
+// string ("role:<tenant>/<id>"). It rejects an empty id or one containing
+// whitespace, ':' or '#' — the characters that would break the type:id object
+// form or fail OpenFGA's object-id validation. Structural only, no whitelist.
+func validID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r == ':' || r == '#' || unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) RemoveGrant(ctx context.Context, domain, subject string) error {

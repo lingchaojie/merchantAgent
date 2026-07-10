@@ -153,6 +153,33 @@ func TestOpenFile_SeedGuardSurvivesEmptyRoles(t *testing.T) {
 	}
 }
 
+func TestCreateRole_RejectsMalformedID(t *testing.T) {
+	ctx := context.Background()
+	s, _ := Open("mock-corp-001")
+	defer s.Close()
+
+	before, _ := s.Roles(ctx)
+	// An id embedded into "role:<tenant>/<id>" must not contain whitespace, ':'
+	// or '#'; a persisted bad id would fail every (boot-time, fatal) Reproject.
+	for _, bad := range []string{"bad id", "role:x", "role#x"} {
+		if err := s.CreateRole(ctx, Role{RoleID: bad, Label: "x"}); err == nil {
+			t.Fatalf("CreateRole(%q) returned nil error", bad)
+		}
+	}
+	after, _ := s.Roles(ctx)
+	if len(after) != len(before) {
+		t.Fatalf("malformed role persisted: roles %d → %d", len(before), len(after))
+	}
+	// A clean id still succeeds.
+	if err := s.CreateRole(ctx, Role{RoleID: "logistics", Label: "物流"}); err != nil {
+		t.Fatalf("valid CreateRole errored: %v", err)
+	}
+	after, _ = s.Roles(ctx)
+	if len(after) != len(before)+1 {
+		t.Fatalf("valid role not persisted: roles %d → %d", len(before), len(after))
+	}
+}
+
 func TestAddGrant_RejectsMalformedSubject(t *testing.T) {
 	ctx := context.Background()
 	s, _ := Open("mock-corp-001")
