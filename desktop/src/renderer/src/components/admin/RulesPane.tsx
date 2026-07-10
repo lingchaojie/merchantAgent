@@ -15,9 +15,12 @@ export function RulesPane({ client }: { client: AdminClient }): JSX.Element {
   }, [client]);
   useEffect(load, [load]);
 
+  // Split + trim only (NO filter): keep empty tokens so a trailing comma survives
+  // a render — otherwise the controlled input erases the separator as it's typed
+  // and keywords merge. Empty terms are dropped at save time instead.
   const setMatch = (i: number, raw: string) =>
     setRules((rs) => rs.map((r, j) =>
-      j === i ? { ...r, match: raw.split(",").map((s) => s.trim()).filter(Boolean) } : r));
+      j === i ? { ...r, match: raw.split(",").map((s) => s.trim()) } : r));
   const setRole = (i: number, roleId: string) =>
     setRules((rs) => rs.map((r, j) => (j === i ? { ...r, roleId } : r)));
   const removeRule = (i: number) => setRules((rs) => rs.filter((_, j) => j !== i));
@@ -27,7 +30,9 @@ export function RulesPane({ client }: { client: AdminClient }): JSX.Element {
   const save = async () => {
     setErr("");
     try {
-      await client.putRules(rules);
+      // Drop empty match terms only on save, so smooth typing doesn't persist blanks.
+      const cleaned = rules.map((r) => ({ ...r, match: r.match.filter((s) => s !== "") }));
+      await client.putRules(cleaned);
       load();
     } catch (e) { setErr(String(e)); }
   };
