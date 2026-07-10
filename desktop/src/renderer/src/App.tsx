@@ -1,14 +1,17 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
 import { CommandPalette } from "./components/CommandPalette";
+import { AdminView } from "./components/admin/AdminView";
 import { getAgent } from "./agent";
+import { makeAdminClient } from "./admin";
 import { foldEvent, type Thread, type Message } from "./types";
 import type { ChatEvent } from "../../shared/contract";
 
 const agent = getAgent();
+const MOCK_TENANT = "mock-corp-001";
 
 function newThread(): Thread {
   return {
@@ -26,6 +29,8 @@ export function App(): JSX.Element {
   const [userId, setUserId] = useState("u_sales1");
   const [busy, setBusy] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [view, setView] = useState<"chat" | "admin">("chat");
+  const adminClient = useMemo(() => makeAdminClient((req) => agent.admin(req), userId), [userId]);
 
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
 
@@ -104,9 +109,21 @@ export function App(): JSX.Element {
         onPickUser={setUserId}
       />
       <main className="main">
-        <TopBar title={active.title} userId={userId} onCommand={() => setPaletteOpen(true)} />
-        <ChatView messages={active.messages} onExample={send} />
-        <Composer disabled={busy} onSend={send} />
+        <TopBar
+          title={active.title}
+          userId={userId}
+          onCommand={() => setPaletteOpen(true)}
+          view={view}
+          onToggleView={() => setView((v) => (v === "chat" ? "admin" : "chat"))}
+        />
+        {view === "chat" ? (
+          <>
+            <ChatView messages={active.messages} onExample={send} />
+            <Composer disabled={busy} onSend={send} />
+          </>
+        ) : (
+          <AdminView client={adminClient} tenantId={MOCK_TENANT} />
+        )}
       </main>
       {paletteOpen && (
         <CommandPalette
