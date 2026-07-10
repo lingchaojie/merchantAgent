@@ -152,3 +152,27 @@ func TestOpenFile_SeedGuardSurvivesEmptyRoles(t *testing.T) {
 		t.Fatalf("roles = %d, want 0 (no re-seed after admin emptied them)", len(roles))
 	}
 }
+
+func TestAddGrant_RejectsMalformedSubject(t *testing.T) {
+	ctx := context.Background()
+	s, _ := Open("mock-corp-001")
+	defer s.Close()
+
+	before, _ := s.Grants(ctx)
+	// Malformed subject (no type:id shape) must error and NOT persist.
+	if err := s.AddGrant(ctx, "cost", "garbage"); err == nil {
+		t.Fatal("AddGrant with malformed subject returned nil error")
+	}
+	after, _ := s.Grants(ctx)
+	if len(after) != len(before) {
+		t.Fatalf("malformed grant persisted: grants %d → %d", len(before), len(after))
+	}
+	// A structurally valid subject succeeds.
+	if err := s.AddGrant(ctx, "cost", "user:u_x"); err != nil {
+		t.Fatalf("valid AddGrant errored: %v", err)
+	}
+	after, _ = s.Grants(ctx)
+	if len(after) != len(before)+1 {
+		t.Fatalf("valid grant not persisted: grants %d → %d", len(before), len(after))
+	}
+}

@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -242,10 +243,34 @@ func (s *Store) AddGrant(ctx context.Context, domain, subject string) error {
 	if domain == "" || subject == "" {
 		return fmt.Errorf("domain and subject required")
 	}
+	if err := validSubject(subject); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO domain_grants (tenant_id, domain_id, subject) VALUES (?,?,?)`,
 		s.tenant, domain, subject)
 	return err
+}
+
+// validSubject checks the structural OpenFGA subject shape "type:id[#relation]":
+// a non-empty type before the colon, a non-empty id after it, and (if a "#" is
+// present) a non-empty relation. This is the store-level choke point that keeps a
+// malformed subject from persisting — a bad grant would otherwise fail every
+// Reproject, and boot-time Reproject failure is fatal (bricks a restart). We do
+// NOT whitelist the type here; just the shape.
+func validSubject(subject string) error {
+	id := subject
+	if h := strings.IndexByte(id, '#'); h >= 0 {
+		if h == len(id)-1 {
+			return fmt.Errorf("invalid subject %q: empty relation after #", subject)
+		}
+		id = id[:h]
+	}
+	typ, rest, ok := strings.Cut(id, ":")
+	if !ok || typ == "" || rest == "" {
+		return fmt.Errorf("invalid subject %q: want type:id[#relation]", subject)
+	}
+	return nil
 }
 
 func (s *Store) RemoveGrant(ctx context.Context, domain, subject string) error {
