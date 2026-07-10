@@ -101,3 +101,30 @@ func (s *Store) ListObjects(ctx context.Context, user, relation, typ string) ([]
 	}
 	return resp.GetObjects(), nil
 }
+
+// ReadTuples returns every tuple in the store (all tenants), paginated via the
+// OpenFGA Read API with an empty filter. This is the "current" side of the
+// differential reconcile that wire.Projector runs on every config change.
+func (s *Store) ReadTuples(ctx context.Context) ([]sync.Tuple, error) {
+	var out []sync.Tuple
+	var token string
+	for {
+		opts := fgaclient.ClientReadOptions{}
+		if token != "" {
+			opts.ContinuationToken = &token
+		}
+		resp, err := s.c.Read(ctx).Body(fgaclient.ClientReadRequest{}).Options(opts).Execute()
+		if err != nil {
+			return nil, fmt.Errorf("read tuples: %w", err)
+		}
+		for _, tp := range resp.GetTuples() {
+			k := tp.GetKey()
+			out = append(out, sync.Tuple{User: k.GetUser(), Relation: k.GetRelation(), Object: k.GetObject()})
+		}
+		token = resp.GetContinuationToken()
+		if token == "" {
+			break
+		}
+	}
+	return out, nil
+}
