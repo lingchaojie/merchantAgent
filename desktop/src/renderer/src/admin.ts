@@ -12,6 +12,11 @@ export interface Skill {
   roles: string[]; sourceTemplateId?: string;
 }
 export interface ToolInfo { name: string; description: string; dataDomain?: string }
+export interface Template {
+  templateId: string; name: string; description: string;
+  playbookMd: string; allowedTools: string[]; dataDomains: string[];
+  suggestedRoles: string[];
+}
 
 type AdminFn = (req: AdminReq) => Promise<AdminResp>;
 
@@ -31,7 +36,7 @@ export function makeAdminClient(admin: AdminFn, userId: string) {
     getRules: () => call<Rule[]>("GET", "/admin/rules"),
     putRules: (rules: Rule[]) => call<void>("PUT", "/admin/rules", rules),
     listSkills: () => call<Skill[]>("GET", "/admin/skills"),
-    listTemplates: () => call<Skill[]>("GET", "/admin/templates"),
+    listTemplates: () => call<Template[]>("GET", "/admin/templates"),
     createSkill: (body: unknown) => call<void>("POST", "/admin/skills", body),
     updateSkill: (id: string, body: unknown) => call<void>("PUT", `/admin/skills/${id}`, body),
     deleteSkill: (id: string) => call<void>("DELETE", `/admin/skills/${id}`),

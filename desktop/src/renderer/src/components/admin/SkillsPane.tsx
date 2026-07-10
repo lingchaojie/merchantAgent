@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
-import type { AdminClient, Skill, ToolInfo, Role } from "../../admin";
+import type { AdminClient, Skill, ToolInfo, Role, Template } from "../../admin";
 
 export function SkillsPane({ client }: { client: AdminClient }): JSX.Element {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [tplId, setTplId] = useState("");
   const [edit, setEdit] = useState<Skill | null>(null);
   const [err, setErr] = useState("");
 
@@ -12,6 +14,7 @@ export function SkillsPane({ client }: { client: AdminClient }): JSX.Element {
     client.listSkills().then(setSkills).catch((e) => setErr(String(e)));
     client.listTools().then(setTools).catch(() => {});
     client.listRoles().then(setRoles).catch(() => {});
+    client.listTemplates().then(setTemplates).catch(() => {});
   }, [client]);
   useEffect(load, [load]);
 
@@ -23,6 +26,14 @@ export function SkillsPane({ client }: { client: AdminClient }): JSX.Element {
       setEdit(null); load();
     } catch (e) { setErr(String(e)); }
   };
+  const clone = async () => {
+    if (!tplId) return;
+    setErr("");
+    try {
+      await client.createSkill({ templateId: tplId });
+      setTplId(""); load();
+    } catch (e) { setErr(String(e)); }
+  };
   const toggle = (arr: string[], v: string): string[] =>
     arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
 
@@ -30,6 +41,15 @@ export function SkillsPane({ client }: { client: AdminClient }): JSX.Element {
     <div className="pane">
       <h3 className="pane-title">技能</h3>
       {err && <div className="pane-err">{err}</div>}
+      <div className="pane-form">
+        <select value={tplId} onChange={(e) => setTplId(e.target.value)}>
+          <option value="">从模板新建…</option>
+          {templates.map((t) => (
+            <option key={t.templateId} value={t.templateId}>{t.name} ({t.templateId})</option>
+          ))}
+        </select>
+        <button className="btn-primary" onClick={clone} disabled={!tplId || templates.length === 0}>克隆</button>
+      </div>
       <ul className="pane-list">
         {skills.map((s) => (
           <li key={s.skillId} className="pane-row">
