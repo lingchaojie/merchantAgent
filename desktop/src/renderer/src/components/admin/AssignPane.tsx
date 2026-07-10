@@ -13,6 +13,9 @@ export function AssignPane({ client, tenantId }: { client: AdminClient; tenantId
   const [domains, setDomains] = useState<Domain[]>([]);
   const [grants, setGrants] = useState<Grant[]>([]);
   const [err, setErr] = useState("");
+  // In-flight guard: serialize mutations so a second toggle can't start from a
+  // stale roles/grants base and overwrite the first (lost update).
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
     client.listSkills().then(setSkills).catch((e) => setErr(String(e)));
@@ -26,16 +29,19 @@ export function AssignPane({ client, tenantId }: { client: AdminClient; tenantId
 
   // Gate A: a skill is usable by a role (capability).
   const toggleSkillRole = async (skill: Skill, roleId: string) => {
-    setErr("");
+    if (busy) return;
+    setErr(""); setBusy(true);
     try {
       await client.updateSkill(skill.skillId, { ...skill, roles: toggle(skill.roles, roleId) });
       load();
     } catch (e) { setErr(String(e)); }
+    finally { setBusy(false); }
   };
 
   // Gate B: a role may view a data domain (data visibility, via OpenFGA grant).
   const toggleDomainRole = async (domainId: string, roleId: string) => {
-    setErr("");
+    if (busy) return;
+    setErr(""); setBusy(true);
     const subject = roleSubject(tenantId, roleId);
     const has = grants.some((g) => g.domainId === domainId && g.subject === subject);
     try {
@@ -43,6 +49,7 @@ export function AssignPane({ client, tenantId }: { client: AdminClient; tenantId
       else await client.addGrant(domainId, subject);
       load();
     } catch (e) { setErr(String(e)); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -59,7 +66,7 @@ export function AssignPane({ client, tenantId }: { client: AdminClient; tenantId
             <span className="assign-checks">
               {roles.map((r) => (
                 <label key={r.roleId} className="chk">
-                  <input type="checkbox" checked={s.roles.includes(r.roleId)}
+                  <input type="checkbox" checked={s.roles.includes(r.roleId)} disabled={busy}
                     onChange={() => toggleSkillRole(s, r.roleId)} />{r.label}
                 </label>
               ))}
@@ -79,7 +86,7 @@ export function AssignPane({ client, tenantId }: { client: AdminClient; tenantId
                 const checked = grants.some((g) => g.domainId === d.domainId && g.subject === subject);
                 return (
                   <label key={r.roleId} className="chk">
-                    <input type="checkbox" checked={checked}
+                    <input type="checkbox" checked={checked} disabled={busy}
                       onChange={() => toggleDomainRole(d.domainId, r.roleId)} />{r.label}
                   </label>
                 );

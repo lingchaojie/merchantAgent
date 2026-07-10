@@ -16,7 +16,10 @@ export function RolesPane({ client }: { client: AdminClient }): JSX.Element {
       setId(""); setLabel(""); load();
     } catch (e) { setErr(String(e)); }
   };
-  const del = async (rid: string) => { await client.deleteRole(rid); load(); };
+  const del = async (rid: string) => {
+    setErr("");
+    try { await client.deleteRole(rid); load(); } catch (e) { setErr(String(e)); }
+  };
 
   return (
     <div className="pane">
