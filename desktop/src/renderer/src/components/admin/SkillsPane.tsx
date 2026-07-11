@@ -30,7 +30,7 @@ export function SkillsPane({ client }: { client: AdminClient }): JSX.Element {
     if (!tplId) return;
     setErr("");
     try {
-      await client.createSkill({ templateId: tplId });
+      await client.cloneTemplate(tplId);
       setTplId(""); load();
     } catch (e) { setErr(String(e)); }
   };

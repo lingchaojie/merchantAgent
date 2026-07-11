@@ -15,4 +15,41 @@ describe("admin client", () => {
     const c = makeAdminClient(admin, "u_sales1");
     await expect(c.listRoles()).rejects.toThrow("admin only");
   });
+
+  it("builds typed blank-skill and template-clone requests", async () => {
+    const admin = vi.fn().mockResolvedValue({ ok: true, data: undefined });
+    const client = makeAdminClient(admin, "u_boss");
+    const skill = {
+      tenantId: "mock-corp-001",
+      skillId: "shipping",
+      name: "物流",
+      description: "",
+      playbookMd: "",
+      allowedTools: [],
+      dataDomains: [],
+      roles: [],
+    };
+
+    await client.createBlankSkill(skill);
+    await client.cloneTemplate("order-360");
+    await client.deleteSkill("shipping");
+
+    expect(admin).toHaveBeenNthCalledWith(1, {
+      method: "POST",
+      path: "/admin/skills",
+      userId: "u_boss",
+      body: { skill },
+    });
+    expect(admin).toHaveBeenNthCalledWith(2, {
+      method: "POST",
+      path: "/admin/skills",
+      userId: "u_boss",
+      body: { templateId: "order-360" },
+    });
+    expect(admin).toHaveBeenNthCalledWith(3, {
+      method: "DELETE",
+      path: "/admin/skills/shipping",
+      userId: "u_boss",
+    });
+  });
 });
