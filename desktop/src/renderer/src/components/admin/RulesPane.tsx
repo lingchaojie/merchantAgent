@@ -1,40 +1,45 @@
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AdminClient, Rule, Role } from "../../admin";
+import { moveItem } from "../../admin-ui";
 
-// Rules map free-text (job/position keywords) → a roleId. They are evaluated
-// top-to-bottom, first match wins. Each rule's `match` is a list of substrings;
-// here it's edited as a comma-joined string and split back into a trimmed array.
 export function RulesPane({ client }: { client: AdminClient }): JSX.Element {
   const [rules, setRules] = useState<Rule[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [ok, setOk] = useState("");
 
-  const load = useCallback(() => {
-    client.getRules().then(setRules).catch((e) => setErr(String(e)));
-    client.listRoles().then(setRoles).catch(() => {});
+  const load = useCallback(async () => {
+    try {
+      const [nextRules, nextRoles] = await Promise.all([client.getRules(), client.listRoles()]);
+      setRules(nextRules); setRoles(nextRoles);
+    } catch (error) {
+      setErr(String(error));
+    }
   }, [client]);
-  useEffect(load, [load]);
 
-  // Split + trim only (NO filter): keep empty tokens so a trailing comma survives
-  // a render — otherwise the controlled input erases the separator as it's typed
-  // and keywords merge. Empty terms are dropped at save time instead.
-  const setMatch = (i: number, raw: string) =>
-    setRules((rs) => rs.map((r, j) =>
-      j === i ? { ...r, match: raw.split(",").map((s) => s.trim()) } : r));
-  const setRole = (i: number, roleId: string) =>
-    setRules((rs) => rs.map((r, j) => (j === i ? { ...r, roleId } : r)));
-  const removeRule = (i: number) => setRules((rs) => rs.filter((_, j) => j !== i));
-  const addRule = () =>
-    setRules((rs) => [...rs, { match: [], roleId: roles[0]?.roleId ?? "" }]);
+  useEffect(() => { void load(); }, [load]);
+
+  const setMatch = (index: number, raw: string) => setRules((items) => items.map((rule, i) => i === index
+    ? { ...rule, match: raw.split(",").map((term) => term.trim()) }
+    : rule));
+  const setRole = (index: number, roleId: string) => setRules((items) => items.map((rule, i) => i === index
+    ? { ...rule, roleId }
+    : rule));
+  const removeRule = (index: number) => setRules((items) => items.filter((_, i) => i !== index));
+  const addRule = () => setRules((items) => [...items, { match: [], roleId: roles[0]?.roleId ?? "" }]);
 
   const save = async () => {
-    setErr("");
+    const cleaned = rules.map((rule) => ({ ...rule, match: rule.match.filter(Boolean) }));
+    setBusy(true); setErr(""); setOk("");
     try {
-      // Drop empty match terms only on save, so smooth typing doesn't persist blanks.
-      const cleaned = rules.map((r) => ({ ...r, match: r.match.filter((s) => s !== "") }));
       await client.putRules(cleaned);
-      load();
-    } catch (e) { setErr(String(e)); }
+      await load(); setOk("已生效");
+    } catch (error) {
+      setErr(String(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -42,26 +47,29 @@ export function RulesPane({ client }: { client: AdminClient }): JSX.Element {
       <h3 className="pane-title">职位映射</h3>
       <div className="pane-caption">规则自上而下匹配，命中第一条即生效。</div>
       {err && <div className="pane-err">{err}</div>}
+      {ok && <div className="pane-ok">{ok}</div>}
       <ul className="pane-list">
-        {rules.map((r, i) => (
-          <li key={i} className="pane-row">
-            <input
-              placeholder="关键词，逗号分隔 (如 利润,成本)"
-              value={r.match.join(",")}
-              onChange={(e) => setMatch(i, e.target.value)}
-            />
-            <select value={r.roleId} onChange={(e) => setRole(i, e.target.value)}>
-              {roles.map((ro) => (
-                <option key={ro.roleId} value={ro.roleId}>{ro.label}</option>
-              ))}
+        {rules.map((rule, index) => (
+          <li key={index} className="pane-row rule-row">
+            <span className="rule-order">{index + 1}</span>
+            <input placeholder="关键词，逗号分隔 (如 利润,成本)" value={rule.match.join(",")}
+              disabled={busy} onChange={(event) => setMatch(index, event.target.value)} />
+            <select value={rule.roleId} disabled={busy} onChange={(event) => setRole(index, event.target.value)}>
+              {roles.map((role) => <option key={role.roleId} value={role.roleId}>{role.label}</option>)}
             </select>
-            <button className="btn-danger" onClick={() => removeRule(i)}>删除</button>
+            <span className="pane-actions">
+              <button className="icon-btn" title="上移" disabled={busy || index === 0}
+                onClick={() => setRules((items) => moveItem(items, index, -1))}>↑</button>
+              <button className="icon-btn" title="下移" disabled={busy || index === rules.length - 1}
+                onClick={() => setRules((items) => moveItem(items, index, 1))}>↓</button>
+              <button className="btn-danger" disabled={busy} onClick={() => removeRule(index)}>删除</button>
+            </span>
           </li>
         ))}
       </ul>
       <div className="pane-form">
-        <button className="btn" onClick={addRule}>添加规则</button>
-        <button className="btn-primary" onClick={save}>保存</button>
+        <button className="btn" disabled={busy || roles.length === 0} onClick={addRule}>添加规则</button>
+        <button className="btn-primary" disabled={busy} onClick={() => void save()}>保存</button>
       </div>
     </div>
   );
