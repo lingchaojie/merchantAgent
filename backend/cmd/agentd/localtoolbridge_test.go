@@ -131,10 +131,100 @@ func TestLocalToolBridgePreservesDesktopErrorStatus(t *testing.T) {
 	}
 }
 
+func TestResolveLocalToolClaimsPendingRequestBeforeDelivery(t *testing.T) {
+	ch := make(chan connector.LocalToolResponse, 1)
+	s := &server{pendingTools: map[string]chan connector.LocalToolResponse{"req-1": ch}}
+
+	if !s.resolveLocalTool("req-1", connector.LocalToolResponse{}) {
+		t.Fatal("pending request not resolved")
+	}
+	s.mu.Lock()
+	_, stillPending := s.pendingTools["req-1"]
+	s.mu.Unlock()
+	if stillPending {
+		t.Fatal("resolved request was not claimed atomically")
+	}
+}
+
+func TestResolveLocalToolAllowsExactlyOneConcurrentResult(t *testing.T) {
+	ch := make(chan connector.LocalToolResponse, 1)
+	s := &server{pendingTools: map[string]chan connector.LocalToolResponse{"req-1": ch}}
+	start := make(chan struct{})
+	results := make(chan bool, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			results <- s.resolveLocalTool("req-1", connector.LocalToolResponse{})
+		}()
+	}
+	close(start)
+
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("no result was delivered")
+	}
+	succeeded := 0
+	for i := 0; i < 2; i++ {
+		select {
+		case ok := <-results:
+			if ok {
+				succeeded++
+			}
+		case <-time.After(time.Second):
+			t.Fatal("concurrent resolver blocked")
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("successful resolvers=%d want=1", succeeded)
+	}
+}
+
+func TestLocalToolBridgeRejectsLateResultAfterCancellation(t *testing.T) {
+	s := &server{pendingTools: map[string]chan connector.LocalToolResponse{}}
+	reqIDs := make(chan string, 1)
+	bridge := &localToolBridge{srv: s, send: func(_ string, value any) {
+		reqIDs <- localToolRequestID(t, value)
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := bridge.InvokeLocalTool(ctx, connector.LocalToolRequest{})
+		result <- err
+	}()
+	reqID := <-reqIDs
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	if s.resolveLocalTool(reqID, connector.LocalToolResponse{}) {
+		t.Fatal("late result resolved a cancelled request")
+	}
+}
+
+func TestLocalToolResultRejectsNonPostMethod(t *testing.T) {
+	s := &server{pendingTools: map[string]chan connector.LocalToolResponse{}}
+	req := httptest.NewRequest(http.MethodGet, "/chat/local-tool-result", nil)
+	w := httptest.NewRecorder()
+
+	s.handleLocalToolResult(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want=%d", w.Code, http.StatusMethodNotAllowed)
+	}
+	if got := w.Header().Get("Allow"); got != http.MethodPost {
+		t.Fatalf("Allow=%q", got)
+	}
+}
+
 func TestLocalToolBridgeTimeoutIsUnknownExecution(t *testing.T) {
 	s := &server{pendingTools: map[string]chan connector.LocalToolResponse{}}
-	bridge := &localToolBridge{srv: s, timeout: time.Millisecond, send: func(string, any) {}}
+	reqIDs := make(chan string, 1)
+	bridge := &localToolBridge{srv: s, timeout: time.Millisecond, send: func(_ string, value any) {
+		reqIDs <- localToolRequestID(t, value)
+	}}
 	response, err := bridge.InvokeLocalTool(context.Background(), connector.LocalToolRequest{})
+	reqID := <-reqIDs
 	var executionErr *connector.ExecutionError
 	if !errors.As(err, &executionErr) || executionErr.Meta.Status != "unknown" {
 		t.Fatalf("response=%+v err=%v typed=%+v", response, err, executionErr)
@@ -142,6 +232,24 @@ func TestLocalToolBridgeTimeoutIsUnknownExecution(t *testing.T) {
 	if response.Meta.Status != "unknown" {
 		t.Fatalf("response=%+v", response)
 	}
+	if s.resolveLocalTool(reqID, connector.LocalToolResponse{}) {
+		t.Fatal("late result resolved an expired request")
+	}
+}
+
+func localToolRequestID(t *testing.T, value any) string {
+	t.Helper()
+	b, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		ReqID string `json:"reqId"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.ReqID
 }
 
 func postLocalToolResult(t *testing.T, baseURL string, payload map[string]any) int {

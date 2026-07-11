@@ -124,6 +124,11 @@ func (s *server) handleFileResult(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleLocalToolResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
 	var req struct {
 		ReqID string                  `json:"reqId"`
 		Data  map[string]any          `json:"data"`

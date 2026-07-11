@@ -73,10 +73,17 @@ func (b *localToolBridge) InvokeLocalTool(ctx context.Context, req connector.Loc
 func (s *server) resolveLocalTool(reqID string, response connector.LocalToolResponse) bool {
 	s.mu.Lock()
 	ch := s.pendingTools[reqID]
+	if ch != nil {
+		delete(s.pendingTools, reqID)
+	}
 	s.mu.Unlock()
 	if ch == nil {
 		return false
 	}
-	ch <- response
-	return true
+	select {
+	case ch <- response:
+		return true
+	default:
+		return false
+	}
 }
