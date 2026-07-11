@@ -1,4 +1,4 @@
-import { defineConfig } from "electron-vite";
+import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
 
@@ -6,6 +6,7 @@ import { resolve } from "path";
 // security model (contextIsolation/sandbox) lives in src/main/index.ts, not here.
 export default defineConfig({
   main: {
+    plugins: [externalizeDepsPlugin()],
     build: {
       lib: { entry: resolve(__dirname, "src/main/index.ts") },
     },

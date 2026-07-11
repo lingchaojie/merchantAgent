@@ -17,6 +17,7 @@
     "dist": "electron-vite build && electron-builder"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22",
     "@types/react": "^18",
     "@types/react-dom": "^18",
@@ -29,6 +30,7 @@
     "vitest": "^2"
   },
   "dependencies": {
+    "better-sqlite3": "^12.11.1",
     "react": "^18",
     "react-dom": "^18"
   },
@@ -36,7 +38,8 @@
     "appId": "com.merchantagent.desktop",
     "productName": "merchantAgent",
     "files": ["out/**"],
-    "npmRebuild": false,
+    "npmRebuild": true,
+    "asarUnpack": ["node_modules/better-sqlite3/**/*"],
     "win": { "target": ["nsis"] },
     "mac": { "target": ["dmg"] },
     "linux": { "target": ["AppImage"] }
