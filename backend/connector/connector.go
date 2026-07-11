@@ -63,6 +63,17 @@ type ToolSpec struct {
 	ResultFields         []string
 }
 
+// WithDefaults returns a copy with legacy metadata defaults applied.
+func (s ToolSpec) WithDefaults() ToolSpec {
+	if s.Execution == "" {
+		s.Execution = ExecutionServer
+	}
+	if s.Risk == "" {
+		s.Risk = RiskRead
+	}
+	return s
+}
+
 // Tool is a single callable capability.
 type Tool interface {
 	Spec() ToolSpec
