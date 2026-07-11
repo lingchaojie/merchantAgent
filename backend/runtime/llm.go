@@ -110,7 +110,11 @@ func toolDef(spec connector.ToolSpec) provider.ToolDef {
 	props := map[string]any{}
 	var required []string
 	for _, p := range spec.Params {
-		props[p.Name] = map[string]any{"type": "string", "description": p.Description}
+		typ := p.Type
+		if typ == "" {
+			typ = connector.ParamString
+		}
+		props[p.Name] = map[string]any{"type": string(typ), "description": p.Description}
 		if p.Required {
 			required = append(required, p.Name)
 		}
@@ -285,6 +289,9 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 	// Ambient tool (local files): no skill gate, no OpenFGA guard — it self-gates
 	// on the client (fsguard + confirmation). Audited as an ambient action.
 	if at, ok := a.ambient[name]; ok {
+		if err := connector.ValidateArgs(at.Spec(), args); err != nil {
+			return fmt.Sprintf("工具参数无效：%v", err)
+		}
 		a.record(p, name, args, Decision{Allowed: true, Reason: "ambient (client-gated)"})
 		data, err := at.Invoke(ctx, args)
 		if err != nil {
@@ -301,6 +308,9 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 		return fmt.Sprintf("工具 %q 尚未通过技能解锁或不存在。", name)
 	}
 	spec := tool.Spec()
+	if err := connector.ValidateArgs(spec, args); err != nil {
+		return fmt.Sprintf("工具参数无效：%v", err)
+	}
 
 	dec, err := a.guard.Authorize(ctx, p, spec, args)
 	if err != nil {
@@ -343,4 +353,3 @@ func (a *LLMAgent) record(p org.Principal, tool string, args map[string]any, d D
 		Decision: decision, Reason: d.Reason,
 	})
 }
-

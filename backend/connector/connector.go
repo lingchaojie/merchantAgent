@@ -7,10 +7,34 @@ package connector
 
 import "context"
 
+type ParamType string
+
+const (
+	ParamString  ParamType = "string"
+	ParamInteger ParamType = "integer"
+	ParamBoolean ParamType = "boolean"
+)
+
+type ExecutionLocation string
+
+const (
+	ExecutionServer  ExecutionLocation = "server"
+	ExecutionDesktop ExecutionLocation = "desktop"
+)
+
+type RiskLevel string
+
+const (
+	RiskRead      RiskLevel = "read"
+	RiskLowWrite  RiskLevel = "low_write"
+	RiskHighWrite RiskLevel = "high_write"
+)
+
 // ParamSpec describes one tool parameter (for schema + LLM/router use).
 type ParamSpec struct {
 	Name        string
 	Description string
+	Type        ParamType
 	Required    bool
 }
 
@@ -23,13 +47,20 @@ type ParamSpec struct {
 // Empty authz fields mean "not applicable" (e.g. a tool touching no sensitive
 // domain leaves DataDomain empty).
 type ToolSpec struct {
-	Name        string
-	Description string
-	Params      []ParamSpec
-
-	ResourceType string // object type the tool reads, e.g. "order" (optional)
-	ResourceArg  string // which arg holds the resource id, e.g. "orderId" (optional)
-	DataDomain   string // sensitive data domain touched, e.g. "cost" (optional)
+	PackageID            string
+	Version              string
+	ManifestDigest       string
+	Name                 string
+	Description          string
+	Params               []ParamSpec
+	ResourceType         string
+	ResourceKind         string
+	ResourceArg          string
+	DataDomain           string
+	Execution            ExecutionLocation
+	Risk                 RiskLevel
+	RequiresConfirmation bool
+	ResultFields         []string
 }
 
 // Tool is a single callable capability.

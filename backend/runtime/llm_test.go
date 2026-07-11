@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/merchantagent/backend/connector"
@@ -9,6 +10,76 @@ import (
 	"github.com/merchantagent/backend/org"
 	"github.com/merchantagent/backend/provider"
 )
+
+func TestToolDefUsesDeclaredParamTypes(t *testing.T) {
+	def := toolDef(connector.ToolSpec{Params: []connector.ParamSpec{
+		{Name: "name"},
+		{Name: "completionRate", Type: connector.ParamInteger},
+		{Name: "confirmed", Type: connector.ParamBoolean},
+	}})
+	properties := def.Function.Parameters["properties"].(map[string]any)
+	for name, want := range map[string]string{
+		"name":           "string",
+		"completionRate": "integer",
+		"confirmed":      "boolean",
+	} {
+		property := properties[name].(map[string]any)
+		if got := property["type"]; got != want {
+			t.Errorf("%s type = %v, want %q", name, got, want)
+		}
+	}
+}
+
+type countingChecker struct{ calls int }
+
+func (c *countingChecker) Check(context.Context, string, string, string) (bool, error) {
+	c.calls++
+	return true, nil
+}
+
+type countingTool struct {
+	spec        connector.ToolSpec
+	invocations int
+}
+
+func (t *countingTool) Spec() connector.ToolSpec { return t.spec }
+func (t *countingTool) Invoke(context.Context, map[string]any) (map[string]any, error) {
+	t.invocations++
+	return map[string]any{"ok": true}, nil
+}
+
+func TestDispatchRejectsUnknownArgsBeforeGuardAndInvoke(t *testing.T) {
+	tool := &countingTool{spec: connector.ToolSpec{
+		Name:   "update_order",
+		Params: []connector.ParamSpec{{Name: "orderId", Required: true}},
+	}}
+	checker := &countingChecker{}
+	agent := &LLMAgent{
+		guard: NewGuard(checker, "t"),
+		tools: map[string]connector.Tool{"update_order": tool},
+	}
+	available := map[string]bool{"update_order": true}
+	var toolDefs []provider.ToolDef
+	result := agent.dispatch(
+		context.Background(),
+		org.Principal{TenantID: "t", UserID: "u1"},
+		provider.Call("c1", "update_order", map[string]any{"orderId": "SO-1001", "sql": "DROP"}).ToolCalls[0],
+		nil,
+		available,
+		&toolDefs,
+		nil,
+	)
+
+	if !strings.Contains(result, "unknown argument sql") {
+		t.Fatalf("result = %q, want unknown argument error", result)
+	}
+	if checker.calls != 0 {
+		t.Errorf("guard checker called %d times, want 0", checker.calls)
+	}
+	if tool.invocations != 0 {
+		t.Errorf("tool invoked %d times, want 0", tool.invocations)
+	}
+}
 
 // fakeBridge canned-answers file requests (stands in for the desktop).
 type fakeBridge struct{ readContent string }
@@ -18,6 +89,37 @@ func (f fakeBridge) RequestFile(_ context.Context, op, path, _ string) (string, 
 		return f.readContent, nil
 	}
 	return "written:" + path, nil
+}
+
+type countingBridge struct{ calls int }
+
+func (b *countingBridge) RequestFile(context.Context, string, string, string) (string, error) {
+	b.calls++
+	return "written", nil
+}
+
+func TestDispatchRejectsUnknownAmbientArgsBeforeBridge(t *testing.T) {
+	bridge := &countingBridge{}
+	agent := (&LLMAgent{}).WithAmbient(localfile.Tools()...)
+	var toolDefs []provider.ToolDef
+	result := agent.dispatch(
+		connector.WithFileBridge(context.Background(), bridge),
+		org.Principal{TenantID: "t", UserID: "u1"},
+		provider.Call("c1", "write_local_file", map[string]any{
+			"path": "notes.txt", "content": "hello", "sql": "DROP",
+		}).ToolCalls[0],
+		nil,
+		map[string]bool{"write_local_file": true},
+		&toolDefs,
+		nil,
+	)
+
+	if !strings.Contains(result, "unknown argument sql") {
+		t.Fatalf("result = %q, want unknown argument error", result)
+	}
+	if bridge.calls != 0 {
+		t.Errorf("file bridge called %d times, want 0", bridge.calls)
+	}
 }
 
 // Ambient local-file tool: offered from the start (no skill load), no guard, and
@@ -68,8 +170,8 @@ func (s stubTool) Invoke(context.Context, map[string]any) (map[string]any, error
 
 type stubConn struct{ tools []connector.Tool }
 
-func (c stubConn) Name() string             { return "stub" }
-func (c stubConn) Tools() []connector.Tool  { return c.tools }
+func (c stubConn) Name() string            { return "stub" }
+func (c stubConn) Tools() []connector.Tool { return c.tools }
 
 type fakeResolver struct{ skills []SkillInfo }
 
