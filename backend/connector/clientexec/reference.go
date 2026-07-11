@@ -87,8 +87,6 @@ func (t proxyTool) Invoke(ctx context.Context, args map[string]any) (map[string]
 	if !ok {
 		return nil, fmt.Errorf("local tool invocation metadata missing")
 	}
-	keyInput := invocation.TenantID + "|" + invocation.UserID + "|" + invocation.CallID + "|" + t.spec.Name
-	keySum := sha256.Sum256([]byte(keyInput))
 	response, err := bridge.InvokeLocalTool(ctx, connector.LocalToolRequest{
 		PackageID:            t.spec.PackageID,
 		PackageVersion:       t.spec.Version,
@@ -99,7 +97,7 @@ func (t proxyTool) Invoke(ctx context.Context, args map[string]any) (map[string]
 		SkillID:              invocation.SkillID,
 		CallID:               invocation.CallID,
 		DeviceID:             invocation.DeviceID,
-		IdempotencyKey:       hex.EncodeToString(keySum[:]),
+		IdempotencyKey:       connector.ExpectedIdempotencyKey(invocation, t.spec.Name),
 		RoleIDs:              invocation.RoleIDs,
 		Args:                 args,
 		Risk:                 t.spec.Risk,

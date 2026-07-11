@@ -129,7 +129,9 @@ func serveAudit(w http.ResponseWriter, r *http.Request, tenant string, audit *ru
 	}
 	chain := audit.Chain(tenant)
 	entries := chain.Entries()
+	entriesScope := "tenant_chain"
 	if !isAdmin {
+		entriesScope = "caller"
 		own := make([]runtime.AuditEntry, 0, len(entries))
 		for _, entry := range entries {
 			if entry.UserID == uid {
@@ -139,9 +141,11 @@ func serveAudit(w http.ResponseWriter, r *http.Request, tenant string, audit *ru
 		entries = own
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tenant":   tenant,
-		"verified": chain.Verify(),
-		"entries":  entries,
+		"tenant":            tenant,
+		"verified":          chain.Verify(),
+		"verificationScope": "full_tenant_chain_server",
+		"entriesScope":      entriesScope,
+		"entries":           entries,
 	})
 }
 

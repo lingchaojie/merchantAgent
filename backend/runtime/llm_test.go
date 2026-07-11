@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"reflect"
 	"strings"
@@ -57,12 +59,23 @@ func (c *countingChecker) Check(context.Context, string, string, string) (bool, 
 type countingTool struct {
 	spec        connector.ToolSpec
 	invocations int
+	err         error
+	panicValue  any
 }
 
 func (t *countingTool) Spec() connector.ToolSpec { return t.spec }
 func (t *countingTool) Invoke(context.Context, map[string]any) (map[string]any, error) {
 	t.invocations++
-	return map[string]any{"ok": true}, nil
+	if t.panicValue != nil {
+		panic(t.panicValue)
+	}
+	return map[string]any{"ok": true}, t.err
+}
+
+type failingChecker struct{ err error }
+
+func (f failingChecker) Check(context.Context, string, string, string) (bool, error) {
+	return false, f.err
 }
 
 func TestDispatchRejectsUnknownArgsBeforeGuardAndInvoke(t *testing.T) {
@@ -96,6 +109,101 @@ func TestDispatchRejectsUnknownArgsBeforeGuardAndInvoke(t *testing.T) {
 	}
 	if tool.invocations != 0 {
 		t.Errorf("tool invoked %d times, want 0", tool.invocations)
+	}
+}
+
+func TestDispatchTerminalAuditFailuresAndSanitizedEvents(t *testing.T) {
+	tests := []struct {
+		name       string
+		arguments  string
+		spec       connector.ToolSpec
+		checker    Checker
+		invokeErr  error
+		panicValue any
+		wantStates []string
+		wantCalls  int
+	}{
+		{
+			name: "invalid JSON cannot invoke zero-required tool", arguments: `{`,
+			spec:    connector.ToolSpec{Name: "desktop_tool", Execution: connector.ExecutionDesktop},
+			checker: fakeChecker{allow: map[string]bool{"user:u1|invoker|tool:t/desktop_tool": true}},
+		},
+		{
+			name: "null arguments cannot invoke zero-required tool", arguments: `null`,
+			spec:    connector.ToolSpec{Name: "desktop_tool", Execution: connector.ExecutionDesktop},
+			checker: fakeChecker{allow: map[string]bool{"user:u1|invoker|tool:t/desktop_tool": true}},
+		},
+		{
+			name: "validation failure", arguments: `{}`,
+			spec:    connector.ToolSpec{Name: "desktop_tool", Execution: connector.ExecutionDesktop, Params: []connector.ParamSpec{{Name: "orderId", Required: true}}},
+			checker: fakeChecker{allow: map[string]bool{"user:u1|invoker|tool:t/desktop_tool": true}},
+		},
+		{
+			name: "guard backend failure", arguments: `{"orderId":"SO-1001"}`,
+			spec:    connector.ToolSpec{Name: "desktop_tool", Execution: connector.ExecutionDesktop, Params: []connector.ParamSpec{{Name: "orderId", Required: true}}},
+			checker: failingChecker{err: errors.New("openfga unavailable")},
+		},
+		{
+			name: "invoke failure", arguments: `{"orderId":"SO-1001"}`,
+			spec:      connector.ToolSpec{Name: "desktop_tool", Execution: connector.ExecutionDesktop, Params: []connector.ParamSpec{{Name: "orderId", Required: true}}},
+			checker:   fakeChecker{allow: map[string]bool{"user:u1|invoker|tool:t/desktop_tool": true}},
+			invokeErr: errors.New("connector failed"), wantStates: []string{"executing", "failed"}, wantCalls: 1,
+		},
+		{
+			name: "connector panic", arguments: `{"orderId":"SO-1001"}`,
+			spec:       connector.ToolSpec{Name: "desktop_tool", Execution: connector.ExecutionDesktop, Params: []connector.ParamSpec{{Name: "orderId", Required: true}}},
+			checker:    fakeChecker{allow: map[string]bool{"user:u1|invoker|tool:t/desktop_tool": true}},
+			panicValue: "connector panic", wantStates: []string{"executing", "failed"}, wantCalls: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := &countingTool{spec: tc.spec, err: tc.invokeErr, panicValue: tc.panicValue}
+			audit := NewAuditLog()
+			agent := &LLMAgent{
+				guard: NewGuard(tc.checker, "t"), audit: audit,
+				tools: map[string]connector.Tool{"desktop_tool": tool},
+			}
+			var events []Event
+			result := agent.dispatch(
+				context.Background(), org.Principal{TenantID: "t", UserID: "u1"},
+				provider.ToolCall{ID: "provider-call-7", Type: "function", Function: provider.FunctionCall{Name: "desktop_tool", Arguments: tc.arguments}},
+				nil, map[string]string{"desktop_tool": "desktop-skill"}, &[]provider.ToolDef{},
+				turnMeta{RoleIDs: []string{"planner"}, DeviceID: "DESKTOP-01"}, func(e Event) { events = append(events, e) },
+			)
+			if result == "" {
+				t.Fatal("dispatch returned an empty failure result")
+			}
+			if tool.invocations != tc.wantCalls {
+				t.Fatalf("tool invocations = %d, want %d", tool.invocations, tc.wantCalls)
+			}
+			entries := audit.Entries()
+			if len(entries) != 1 {
+				t.Fatalf("audit entries = %d, want exactly one: %+v", len(entries), entries)
+			}
+			if entries[0].Status != "failed" || entries[0].ToolCallID != "provider-call-7" {
+				t.Fatalf("terminal audit = %+v, want failed call provider-call-7", entries[0])
+			}
+			var states []string
+			for _, event := range events {
+				if event.Kind == "tool_call" && len(event.Data) != 0 {
+					t.Fatalf("renderer-visible tool_call leaked args: %+v", event.Data)
+				}
+				if event.Kind == "tool_state" {
+					states = append(states, event.Data["status"].(string))
+				}
+			}
+			wantStates := tc.wantStates
+			if wantStates == nil {
+				wantStates = []string{"failed"}
+			}
+			if !reflect.DeepEqual(states, wantStates) {
+				t.Fatalf("tool states = %v, want %v", states, wantStates)
+			}
+			if !audit.Verify() {
+				t.Fatal("terminal audit chain did not verify")
+			}
+		})
 	}
 }
 
@@ -244,9 +352,14 @@ func localAuditSpec() connector.ToolSpec {
 			{Name: "expectedVersion", Type: connector.ParamInteger, Required: true},
 		},
 		ResourceType: "business_record", ResourceKind: "order", ResourceArg: "orderId",
-		Execution: connector.ExecutionDesktop, Risk: connector.RiskLowWrite,
+		Execution: connector.ExecutionDesktop, Risk: connector.RiskLowWrite, RequiresConfirmation: true,
 		ResultFields: []string{"orderId", "workOrderId", "completionRate", "note", "version"},
 	}
+}
+
+func localAuditIdempotencyKey() string {
+	sum := sha256.Sum256([]byte("t|u1|exec-1|report_production_progress"))
+	return hex.EncodeToString(sum[:])
 }
 
 func localAuditAgent(t *testing.T, tool *localAuditTool, chk Checker) (*LLMAgent, *AuditLog, *provider.Fake, *localAuditResolver) {
@@ -272,7 +385,7 @@ func localAuditAgent(t *testing.T, tool *localAuditTool, chk Checker) (*LLMAgent
 
 func TestLLM_LocalExecutionAuditSucceededAndRedacted(t *testing.T) {
 	meta := connector.ExecutionMeta{
-		Status: "succeeded", ExecutionID: "desktop-exec-1", IdempotencyKey: "idem-1",
+		Status: "succeeded", ExecutionID: "desktop-exec-1", IdempotencyKey: localAuditIdempotencyKey(),
 		Confirmed: true, ConfirmedAt: "2026-07-12T10:00:00Z",
 		Before: map[string]any{"completionRate": float64(60)},
 		After:  map[string]any{"completionRate": float64(80)},
@@ -311,8 +424,8 @@ func TestLLM_LocalExecutionAuditSucceededAndRedacted(t *testing.T) {
 	}
 	e := entries[0]
 	if e.SkillID != "production-progress" || !reflect.DeepEqual(e.RoleIDs, []string{"planner", "sales"}) || e.DeviceID != "DESKTOP-01" ||
-		e.Tool != "report_production_progress" || e.ToolVersion != "1.0.0" || e.ExecutionLocation != "desktop" || e.Risk != "low_write" ||
-		e.Decision != "allow" || e.Status != "succeeded" || e.ExecutionID != "desktop-exec-1" || e.IdempotencyKey != "idem-1" ||
+		e.Tool != "report_production_progress" || e.ToolCallID != "exec-1" || e.ToolVersion != "1.0.0" || e.ExecutionLocation != "desktop" || e.Risk != "low_write" ||
+		e.Decision != "allow" || e.Status != "succeeded" || e.ExecutionID != "desktop-exec-1" || e.IdempotencyKey != localAuditIdempotencyKey() ||
 		!e.Confirmed || e.ConfirmedAt != "2026-07-12T10:00:00Z" || e.ResourceID != "SO-1001" ||
 		!reflect.DeepEqual(e.Before, meta.Before) || !reflect.DeepEqual(e.After, meta.After) {
 		t.Fatalf("audit entry missing lifecycle metadata: %+v", e)
@@ -359,10 +472,10 @@ func TestLLM_LocalExecutionAuditTerminalStates(t *testing.T) {
 		wantCalls    int
 	}{
 		{name: "denied", allowed: false, wantStatus: "denied", wantDecision: "deny", wantCalls: 0},
-		{name: "source conflict", allowed: true, meta: connector.ExecutionMeta{Status: "source_conflict", ExecutionID: "e-conflict"}, err: &connector.ExecutionError{Message: "source_conflict", Meta: connector.ExecutionMeta{Status: "source_conflict", ExecutionID: "e-conflict"}}, wantStatus: "source_conflict", wantDecision: "allow", wantCalls: 1},
-		{name: "explicit failure", allowed: true, meta: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed"}, err: &connector.ExecutionError{Message: "failed", Meta: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed"}}, wantStatus: "failed", wantDecision: "allow", wantCalls: 1},
-		{name: "cancelled", allowed: true, meta: connector.ExecutionMeta{Status: "cancelled", ExecutionID: "e-cancelled"}, err: &connector.ExecutionError{Message: "cancelled", Meta: connector.ExecutionMeta{Status: "cancelled", ExecutionID: "e-cancelled"}}, wantStatus: "cancelled", wantDecision: "allow", wantCalls: 1},
-		{name: "timeout unknown", allowed: true, meta: connector.ExecutionMeta{Status: "unknown", IdempotencyKey: "idem-timeout"}, err: errors.New("desktop execution timeout"), wantStatus: "unknown", wantDecision: "allow", wantCalls: 1},
+		{name: "source conflict", allowed: true, meta: connector.ExecutionMeta{Status: "source_conflict", ExecutionID: "e-conflict", IdempotencyKey: localAuditIdempotencyKey()}, err: &connector.ExecutionError{Message: "source_conflict", Meta: connector.ExecutionMeta{Status: "source_conflict", ExecutionID: "e-conflict", IdempotencyKey: localAuditIdempotencyKey()}}, wantStatus: "source_conflict", wantDecision: "allow", wantCalls: 1},
+		{name: "explicit failure", allowed: true, meta: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed", IdempotencyKey: localAuditIdempotencyKey()}, err: &connector.ExecutionError{Message: "failed", Meta: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed", IdempotencyKey: localAuditIdempotencyKey()}}, wantStatus: "failed", wantDecision: "allow", wantCalls: 1},
+		{name: "cancelled", allowed: true, meta: connector.ExecutionMeta{Status: "cancelled", ExecutionID: "e-cancelled", IdempotencyKey: localAuditIdempotencyKey()}, err: &connector.ExecutionError{Message: "cancelled", Meta: connector.ExecutionMeta{Status: "cancelled", ExecutionID: "e-cancelled", IdempotencyKey: localAuditIdempotencyKey()}}, wantStatus: "cancelled", wantDecision: "allow", wantCalls: 1},
+		{name: "timeout unknown", allowed: true, meta: connector.ExecutionMeta{Status: "unknown", ExecutionID: "e-timeout", IdempotencyKey: localAuditIdempotencyKey()}, err: errors.New("desktop execution timeout"), wantStatus: "unknown", wantDecision: "allow", wantCalls: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -392,7 +505,10 @@ func TestLLM_LocalExecutionAuditTerminalStates(t *testing.T) {
 func TestLLM_LocalExecutionWithoutResultAllowlistReturnsNoData(t *testing.T) {
 	tool := &localAuditTool{spec: localAuditSpec(), data: map[string]any{
 		"orderId": "SO-1001", "executionId": "must-not-leak",
-		connector.ExecutionMetaKey: connector.ExecutionMeta{Status: "succeeded"},
+		connector.ExecutionMetaKey: connector.ExecutionMeta{
+			Status: "succeeded", ExecutionID: "e-success", IdempotencyKey: localAuditIdempotencyKey(),
+			Confirmed: true, ConfirmedAt: "2026-07-12T10:00:00Z",
+		},
 	}}
 	tool.spec.ResultFields = nil
 	chk := fakeChecker{allow: map[string]bool{
@@ -422,7 +538,7 @@ func TestLLM_LocalExecutionWithoutResultAllowlistReturnsNoData(t *testing.T) {
 func TestLLM_LocalExecutionFailedMetadataWithoutErrorDoesNotEmitResult(t *testing.T) {
 	tool := &localAuditTool{spec: localAuditSpec(), data: map[string]any{
 		"orderId": "SO-1001", "completionRate": float64(80),
-		connector.ExecutionMetaKey: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed"},
+		connector.ExecutionMetaKey: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed", IdempotencyKey: localAuditIdempotencyKey()},
 	}}
 	chk := fakeChecker{allow: map[string]bool{
 		"user:u1|invoker|tool:t/report_production_progress": true,
@@ -440,6 +556,74 @@ func TestLLM_LocalExecutionFailedMetadataWithoutErrorDoesNotEmitResult(t *testin
 	}
 	if entries := audit.Entries(); len(entries) != 1 || entries[0].Status != "failed" {
 		t.Fatalf("audit = %+v, want one failed entry", entries)
+	}
+}
+
+func TestLLM_LocalExecutionRejectsUntrustedSuccessMetadata(t *testing.T) {
+	valid := connector.ExecutionMeta{
+		Status: "succeeded", ExecutionID: "desktop-exec-1", IdempotencyKey: localAuditIdempotencyKey(),
+		Confirmed: true, ConfirmedAt: "2026-07-12T10:00:00Z",
+		Before: map[string]any{"completionRate": float64(60)}, After: map[string]any{"completionRate": float64(80)},
+	}
+	tests := []struct {
+		name                    string
+		meta                    connector.ExecutionMeta
+		confirmationNotRequired bool
+	}{
+		{name: "missing metadata"},
+		{name: "missing execution id", meta: func() connector.ExecutionMeta { m := valid; m.ExecutionID = ""; return m }()},
+		{name: "blank execution id", meta: func() connector.ExecutionMeta { m := valid; m.ExecutionID = "   "; return m }()},
+		{name: "mismatched idempotency", meta: func() connector.ExecutionMeta { m := valid; m.IdempotencyKey = "attacker-key"; return m }()},
+		{name: "unconfirmed write", meta: func() connector.ExecutionMeta { m := valid; m.Confirmed = false; return m }()},
+		{name: "missing confirmation time", meta: func() connector.ExecutionMeta { m := valid; m.ConfirmedAt = ""; return m }()},
+		{name: "malformed confirmation time", meta: func() connector.ExecutionMeta { m := valid; m.ConfirmedAt = "not-a-time"; return m }()},
+		{name: "malformed optional confirmation time", meta: func() connector.ExecutionMeta {
+			m := valid
+			m.Confirmed = false
+			m.ConfirmedAt = "not-a-time"
+			return m
+		}(), confirmationNotRequired: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := &localAuditTool{spec: localAuditSpec(), data: map[string]any{
+				"orderId": "SO-1001", "completionRate": float64(80), "internalSql": "UPDATE secret",
+				connector.ExecutionMetaKey: tc.meta,
+			}}
+			if tc.confirmationNotRequired {
+				tool.spec.RequiresConfirmation = false
+			}
+			chk := fakeChecker{allow: map[string]bool{
+				"user:u1|invoker|tool:t/report_production_progress": true,
+				"user:u1|viewer|business_record:t/order/SO-1001":    true,
+			}}
+			agent, audit, fp, _ := localAuditAgent(t, tool, chk)
+			var events []Event
+			if _, _, err := agent.Ask(context.Background(), org.Principal{TenantID: "t", UserID: "u1"}, nil, "更新进度", func(e Event) {
+				events = append(events, e)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			entries := audit.Entries()
+			if len(entries) != 1 || entries[0].Status != "unknown" {
+				t.Fatalf("audit = %+v, want one unknown terminal entry", entries)
+			}
+			if entries[0].ExecutionID != "" || entries[0].Before != nil || entries[0].After != nil || entries[0].Confirmed {
+				t.Fatalf("untrusted execution metadata reached audit: %+v", entries[0])
+			}
+			for _, event := range events {
+				if event.Kind == "tool_result" {
+					t.Fatalf("untrusted success emitted result: %+v", event.Data)
+				}
+			}
+			lastRequest := fp.Requests[len(fp.Requests)-1]
+			for _, message := range lastRequest.Messages {
+				if message.Role == "tool" && message.ToolCallID == "exec-1" &&
+					(strings.Contains(message.Content, "internalSql") || strings.Contains(message.Content, "attacker")) {
+					t.Fatalf("untrusted metadata/result reached provider: %s", message.Content)
+				}
+			}
+		})
 	}
 }
 

@@ -88,7 +88,9 @@ func (a *Agent) Ask(ctx context.Context, p org.Principal, question string) (Answ
 	if err != nil {
 		return Answer{}, err
 	}
-	a.record(p, question, toolName, args, dec)
+	if err := a.record(p, question, toolName, args, dec); err != nil {
+		return Answer{}, fmt.Errorf("record audit: %w", err)
+	}
 	if !dec.Allowed {
 		// Don't leak resource existence; give a uniform refusal.
 		return Answer{Text: "抱歉，你没有权限查看该信息。", Tool: toolName, Denied: true}, nil
@@ -101,15 +103,15 @@ func (a *Agent) Ask(ctx context.Context, p org.Principal, question string) (Answ
 	return Answer{Text: format(toolName, data), Tool: toolName, Data: data}, nil
 }
 
-func (a *Agent) record(p org.Principal, q, tool string, args map[string]any, d Decision) {
+func (a *Agent) record(p org.Principal, q, tool string, args map[string]any, d Decision) error {
 	if a.audit == nil {
-		return
+		return nil
 	}
 	decision := "allow"
 	if !d.Allowed {
 		decision = "deny"
 	}
-	a.audit.Append(AuditEntry{
+	return a.audit.Append(AuditEntry{
 		TenantID: p.TenantID, UserID: p.UserID, Question: q,
 		Tool: tool, Args: args, Decision: decision, Reason: d.Reason,
 	})

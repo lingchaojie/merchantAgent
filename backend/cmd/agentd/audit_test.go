@@ -42,14 +42,15 @@ func TestAuditReadRequiresIdentityAndScopesEntries(t *testing.T) {
 	checker := auditChecker{"user:u_boss": true}
 
 	tests := []struct {
-		name, user string
-		wantCode   int
-		wantTools  []string
+		name, user       string
+		wantCode         int
+		wantTools        []string
+		wantEntriesScope string
 	}{
 		{name: "missing identity", wantCode: http.StatusUnauthorized},
 		{name: "inactive or outside user", user: "ghost", wantCode: http.StatusForbidden},
-		{name: "member sees self", user: "u_sales1", wantCode: http.StatusOK, wantTools: []string{"sales_tool"}},
-		{name: "admin sees tenant", user: "u_boss", wantCode: http.StatusOK, wantTools: []string{"sales_tool", "production_tool", "boss_tool"}},
+		{name: "member sees self", user: "u_sales1", wantCode: http.StatusOK, wantTools: []string{"sales_tool"}, wantEntriesScope: "caller"},
+		{name: "admin sees tenant", user: "u_boss", wantCode: http.StatusOK, wantTools: []string{"sales_tool", "production_tool", "boss_tool"}, wantEntriesScope: "tenant_chain"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,14 +67,19 @@ func TestAuditReadRequiresIdentityAndScopesEntries(t *testing.T) {
 				return
 			}
 			var response struct {
-				Verified bool                 `json:"verified"`
-				Entries  []runtime.AuditEntry `json:"entries"`
+				Verified          bool                 `json:"verified"`
+				VerificationScope string               `json:"verificationScope"`
+				EntriesScope      string               `json:"entriesScope"`
+				Entries           []runtime.AuditEntry `json:"entries"`
 			}
 			if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 				t.Fatal(err)
 			}
 			if !response.Verified {
 				t.Fatal("filtered audit response must retain verified tenant-chain status")
+			}
+			if response.VerificationScope != "full_tenant_chain_server" || response.EntriesScope != tc.wantEntriesScope {
+				t.Fatalf("scopes = verification:%q entries:%q, want full_tenant_chain_server/%q", response.VerificationScope, response.EntriesScope, tc.wantEntriesScope)
 			}
 			if len(response.Entries) != len(tc.wantTools) {
 				t.Fatalf("entries = %+v, want tools %v", response.Entries, tc.wantTools)

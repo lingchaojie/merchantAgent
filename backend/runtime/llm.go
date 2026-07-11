@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/merchantagent/backend/connector"
 	"github.com/merchantagent/backend/org"
@@ -284,10 +285,19 @@ type turnMeta struct {
 func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.ToolCall,
 	byID map[string]SkillInfo, unlockedBy map[string]string, toolDefs *[]provider.ToolDef, turn turnMeta, sink EventSink) string {
 
-	args := map[string]any{}
-	_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 	name := tc.Function.Name
-	sink.emit(Event{Kind: "tool_call", Tool: name, Data: args})
+	sink.emit(Event{Kind: "tool_call", Tool: name})
+	args := map[string]any{}
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil || args == nil {
+		if tool, found := a.tools[name]; found {
+			if skillID, unlocked := unlockedBy[name]; unlocked && skillID != "" {
+				spec := tool.Spec()
+				_ = a.record(p, spec, nil, Decision{Allowed: false, Reason: "invalid tool arguments JSON"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
+				a.emitToolState(sink, spec, name, "failed")
+			}
+		}
+		return "工具参数无效：JSON 格式错误"
+	}
 
 	// Progressive disclosure: load_skill reveals a playbook + unlocks its tools.
 	if name == loadSkillTool {
@@ -317,10 +327,12 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 		}
 		data, err := at.Invoke(ctx, args)
 		if err != nil {
-			a.record(p, at.Spec(), args, Decision{Allowed: true, Reason: "ambient (client-gated)"}, "", turn, executionStatus(err, connector.ExecutionMeta{}), connector.ExecutionMeta{})
+			_ = a.record(p, at.Spec(), args, Decision{Allowed: true, Reason: "ambient (client-gated)"}, "", tc.ID, turn, executionStatus(err, connector.ExecutionMeta{}), connector.ExecutionMeta{})
 			return fmt.Sprintf("本地文件操作失败：%v", err)
 		}
-		a.record(p, at.Spec(), args, Decision{Allowed: true, Reason: "ambient (client-gated)"}, "", turn, "succeeded", connector.ExecutionMeta{})
+		if err := a.record(p, at.Spec(), args, Decision{Allowed: true, Reason: "ambient (client-gated)"}, "", tc.ID, turn, "succeeded", connector.ExecutionMeta{}); err != nil {
+			return "审计记录失败，未返回工具结果"
+		}
 		sink.emit(Event{Kind: "tool_result", Tool: name, Data: data})
 		b, _ := json.Marshal(data)
 		return string(b)
@@ -334,15 +346,19 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 	}
 	spec := tool.Spec()
 	if err := connector.ValidateArgs(spec, args); err != nil {
+		_ = a.record(p, spec, args, Decision{Allowed: false, Reason: "invalid tool arguments"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
+		a.emitToolState(sink, spec, name, "failed")
 		return fmt.Sprintf("工具参数无效：%v", err)
 	}
 
 	dec, err := a.guard.Authorize(ctx, p, spec, args)
 	if err != nil {
+		_ = a.record(p, spec, args, Decision{Allowed: false, Reason: "authorization backend error"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
+		a.emitToolState(sink, spec, name, "failed")
 		return fmt.Sprintf("鉴权错误：%v", err)
 	}
 	if !dec.Allowed {
-		a.record(p, spec, args, dec, skillID, turn, "denied", connector.ExecutionMeta{})
+		_ = a.record(p, spec, args, dec, skillID, tc.ID, turn, "denied", connector.ExecutionMeta{})
 		sink.emit(Event{Kind: "denied", Tool: name})
 		return "无权限执行该操作（" + dec.Reason + "）。请如实告知用户此项不可得。"
 	}
@@ -354,10 +370,21 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 	if spec.WithDefaults().Execution == connector.ExecutionDesktop {
 		sink.emit(Event{Kind: "tool_state", Tool: name, Data: map[string]any{"status": "executing"}})
 	}
-	data, err := tool.Invoke(invokeCtx, args)
+	data, err := invokeSafely(tool, invokeCtx, args)
 	meta := connector.PopExecutionMeta(data)
 	status := executionStatus(err, meta)
-	a.record(p, spec, args, dec, skillID, turn, status, meta)
+	auditDecision := dec
+	if spec.WithDefaults().Execution == connector.ExecutionDesktop {
+		var metaErr error
+		meta, status, metaErr = validateDesktopExecution(spec, invocation, meta, err)
+		if metaErr != nil {
+			auditDecision.Reason = metaErr.Error()
+		}
+	}
+	if auditErr := a.record(p, spec, args, auditDecision, skillID, tc.ID, turn, status, meta); auditErr != nil {
+		a.emitToolState(sink, spec, name, "failed")
+		return "审计记录失败，未返回工具结果"
+	}
 	if spec.WithDefaults().Execution == connector.ExecutionDesktop {
 		sink.emit(Event{Kind: "tool_state", Tool: name, Data: map[string]any{"status": status}})
 	}
@@ -393,9 +420,9 @@ func (a *LLMAgent) ToolSpec(name string) (connector.ToolSpec, bool) {
 }
 
 // record appends an audit entry for a tool decision (nil-safe).
-func (a *LLMAgent) record(p org.Principal, spec connector.ToolSpec, args map[string]any, d Decision, skillID string, turn turnMeta, status string, meta connector.ExecutionMeta) {
+func (a *LLMAgent) record(p org.Principal, spec connector.ToolSpec, args map[string]any, d Decision, skillID, toolCallID string, turn turnMeta, status string, meta connector.ExecutionMeta) error {
 	if a.audit == nil {
-		return
+		return nil
 	}
 	decision := "allow"
 	if !d.Allowed {
@@ -403,15 +430,31 @@ func (a *LLMAgent) record(p org.Principal, spec connector.ToolSpec, args map[str
 	}
 	spec = spec.WithDefaults()
 	resourceID, _ := args[spec.ResourceArg].(string)
-	a.audit.Append(AuditEntry{
+	return a.audit.Append(AuditEntry{
 		TenantID: p.TenantID, UserID: p.UserID, SkillID: skillID,
 		RoleIDs: append([]string(nil), turn.RoleIDs...), DeviceID: turn.DeviceID,
-		Tool: spec.Name, ToolVersion: spec.Version, ExecutionLocation: string(spec.Execution), Risk: string(spec.Risk),
+		Tool: spec.Name, ToolCallID: toolCallID, ToolVersion: spec.Version, ExecutionLocation: string(spec.Execution), Risk: string(spec.Risk),
 		Args: args, Decision: decision, Status: status, Reason: d.Reason,
 		ExecutionID: meta.ExecutionID, IdempotencyKey: meta.IdempotencyKey,
 		Confirmed: meta.Confirmed, ConfirmedAt: meta.ConfirmedAt, ResourceID: resourceID,
 		Before: meta.Before, After: meta.After,
 	})
+}
+
+func (a *LLMAgent) emitToolState(sink EventSink, spec connector.ToolSpec, tool, status string) {
+	if spec.WithDefaults().Execution == connector.ExecutionDesktop {
+		sink.emit(Event{Kind: "tool_state", Tool: tool, Data: map[string]any{"status": status}})
+	}
+}
+
+func invokeSafely(tool connector.Tool, ctx context.Context, args map[string]any) (data map[string]any, err error) {
+	defer func() {
+		if recover() != nil {
+			data = nil
+			err = errors.New("connector panic")
+		}
+	}()
+	return tool.Invoke(ctx, args)
 }
 
 func executionStatus(err error, meta connector.ExecutionMeta) string {
@@ -436,6 +479,48 @@ func executionStatus(err error, meta connector.ExecutionMeta) string {
 	default:
 		return "unknown"
 	}
+}
+
+func validateDesktopExecution(spec connector.ToolSpec, invocation connector.InvocationMeta, meta connector.ExecutionMeta, invokeErr error) (connector.ExecutionMeta, string, error) {
+	expectedKey := connector.ExpectedIdempotencyKey(invocation, spec.Name)
+	invalid := func(reason string) (connector.ExecutionMeta, string, error) {
+		status := "unknown"
+		if invokeErr != nil {
+			status = "failed"
+		}
+		return connector.ExecutionMeta{Status: status, IdempotencyKey: expectedKey}, status, errors.New(reason)
+	}
+	if meta.IdempotencyKey == "" {
+		return invalid("execution metadata missing idempotency key")
+	}
+	if meta.IdempotencyKey != expectedKey {
+		return invalid("execution metadata idempotency mismatch")
+	}
+	if strings.TrimSpace(meta.ExecutionID) == "" {
+		return invalid("execution metadata missing execution id")
+	}
+	switch meta.Status {
+	case "succeeded", "failed", "cancelled", "source_conflict", "unknown":
+	default:
+		return invalid("execution metadata has invalid status")
+	}
+	if invokeErr != nil && meta.Status == "succeeded" {
+		return invalid("execution metadata contradicts invocation error")
+	}
+	if meta.ConfirmedAt != "" {
+		if _, err := time.Parse(time.RFC3339, meta.ConfirmedAt); err != nil {
+			return invalid("execution metadata has invalid confirmation time")
+		}
+	}
+	if meta.Status == "succeeded" && spec.RequiresConfirmation {
+		if !meta.Confirmed {
+			return invalid("execution metadata missing confirmation")
+		}
+		if meta.ConfirmedAt == "" {
+			return invalid("execution metadata missing confirmation time")
+		}
+	}
+	return meta, meta.Status, nil
 }
 
 func filterResult(data map[string]any, fields []string, enforceAllowlist bool) map[string]any {

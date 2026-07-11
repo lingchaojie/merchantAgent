@@ -2,6 +2,8 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 )
 
@@ -88,6 +90,13 @@ func WithInvocation(ctx context.Context, m InvocationMeta) context.Context {
 func InvocationFrom(ctx context.Context) (InvocationMeta, bool) {
 	m, ok := ctx.Value(invocationKey{}).(InvocationMeta)
 	return m, ok
+}
+
+// ExpectedIdempotencyKey binds one provider tool call to one local tool.
+func ExpectedIdempotencyKey(invocation InvocationMeta, tool string) string {
+	input := invocation.TenantID + "|" + invocation.UserID + "|" + invocation.CallID + "|" + tool
+	sum := sha256.Sum256([]byte(input))
+	return hex.EncodeToString(sum[:])
 }
 
 func WithLocalToolBridge(ctx context.Context, b LocalToolBridge) context.Context {
