@@ -38,6 +38,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		SessionID string `json:"sessionId"`
 		UserID    string `json:"userId"`
 		Question  string `json:"question"`
+		DeviceID  string `json:"deviceId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
@@ -70,7 +71,13 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Attach the reverse file bridge so local-file tools round-trip to this
 	// client over the SSE stream (design §2, M4b).
-	ctx := connector.WithFileBridge(r.Context(), &fileBridge{srv: s, send: send})
+	deviceID := req.DeviceID
+	if deviceID == "" {
+		deviceID = "unknown-device"
+	}
+	ctx := connector.WithDeviceID(r.Context(), deviceID)
+	ctx = connector.WithFileBridge(ctx, &fileBridge{srv: s, send: send})
+	ctx = connector.WithLocalToolBridge(ctx, &localToolBridge{srv: s, send: send})
 	final, updated, err := s.asm.Agent.Ask(ctx, p, history, req.Question, sink)
 	if err != nil {
 		send("error", map[string]string{"error": err.Error()})
@@ -110,6 +117,25 @@ func (s *server) handleFileResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.resolveFile(req.ReqID, fileResult{content: req.Content, err: req.Error}) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown or expired reqId"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) handleLocalToolResult(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ReqID string                  `json:"reqId"`
+		Data  map[string]any          `json:"data"`
+		Meta  connector.ExecutionMeta `json:"meta"`
+		Error string                  `json:"error"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+	response := connector.LocalToolResponse{Data: req.Data, Meta: req.Meta, Error: req.Error}
+	if !s.resolveLocalTool(req.ReqID, response) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown or expired reqId"})
 		return
 	}
