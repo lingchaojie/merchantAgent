@@ -535,6 +535,15 @@
 .skill-editor textarea { display: block; margin-top: 4px; }
 
 @media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; grid-template-rows: 52px minmax(0, 1fr); }
+  .sidebar { display: grid; grid-template-columns: minmax(0, 1fr) auto; min-width: 0; border-right: 0; border-bottom: 1px solid var(--border); }
+  .side-head { min-width: 0; padding: 8px 10px; }
+  .thread-list { display: none; }
+  .side-foot { border-top: 0; padding: 4px 8px; min-width: 0; }
+  .ident { padding: 4px; }
+  .ident-role, .mock-tag { display: none; }
+  .topbar-title { flex: 1; min-width: 0; }
+  .ident-chip { display: none; }
   .admin { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .admin-nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border); }
   .admin-tab { white-space: nowrap; }
@@ -542,4 +551,6 @@
   .role-edit, .role-create, .rule-row { grid-template-columns: 1fr; }
   .skill-fields { grid-template-columns: 1fr; }
   .rule-order { text-align: left; }
+  .pane-row { align-items: flex-start; gap: 8px; }
+  .pane-row code { min-width: 0; overflow-wrap: anywhere; }
 }
