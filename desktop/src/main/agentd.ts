@@ -2,7 +2,15 @@
 // (thin client) driving a cloud/loopback agentd that owns orchestration/authz.
 // Chat is streamed over SSE; login is a plain POST.
 import { spawn, type ChildProcess } from "node:child_process";
-import type { ChatEvent, ChatReq, Principal } from "../shared/contract";
+import crypto from "node:crypto";
+import os from "node:os";
+import type {
+  ChatEvent,
+  ChatReq,
+  LocalToolRequest,
+  LocalToolResponse,
+  Principal,
+} from "../shared/contract";
 
 // Use "localhost" (not the 127.0.0.1 IPv4 literal): when agentd runs in WSL2,
 // Windows' localhost relay is often IPv6-only (::1), and Node's fetch
@@ -26,18 +34,21 @@ async function post<T>(pathname: string, body: unknown): Promise<T> {
 // FileRequestHandler executes a backend file_request on the client (fsguard),
 // returning the read content or a write confirmation (or an error string).
 export type FileRequestHandler = (e: ChatEvent) => Promise<{ content?: string; error?: string }>;
+export type LocalToolRequestHandler = (request: LocalToolRequest) => Promise<LocalToolResponse>;
 
-// chat opens the SSE stream, forwards each event to onEvent, handles file_request
-// events via onFile (M4b reverse bridge), and resolves with the final answer text.
+// chat opens the SSE stream, forwards renderer-safe events to onEvent, handles
+// privileged reverse-bridge requests locally, and resolves with the final text.
 async function chat(
   req: ChatReq,
   onEvent: (e: ChatEvent) => void,
   onFile?: FileRequestHandler,
+  onLocalTool?: LocalToolRequestHandler,
 ): Promise<string> {
+  const deviceId = os.hostname();
   const res = await fetch(BASE + "/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(req),
+    body: JSON.stringify({ ...req, deviceId }),
   });
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => "");
@@ -61,7 +72,41 @@ async function chat(
       if (ev.kind === "done" || ev.kind === "final") {
         if (ev.text) final = ev.text;
       }
-      onEvent(ev); // always surface to the UI
+      if (ev.kind === "local_tool_request") {
+        const request = { ...(ev as unknown as LocalToolRequest), deviceId };
+        let out: LocalToolResponse;
+        try {
+          out = onLocalTool
+            ? await onLocalTool(request)
+            : {
+                meta: {
+                  status: "failed",
+                  executionId: crypto.randomUUID(),
+                  idempotencyKey: request.idempotencyKey,
+                  confirmed: false,
+                },
+                error: "local tools unavailable",
+              };
+        } catch (error) {
+          out = {
+            meta: {
+              status: "failed",
+              executionId: crypto.randomUUID(),
+              idempotencyKey: request.idempotencyKey,
+              confirmed: false,
+            },
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        await post("/chat/local-tool-result", {
+          reqId: request.reqId,
+          data: out.data ?? {},
+          meta: out.meta,
+          error: out.error ?? "",
+        });
+        continue;
+      }
+      onEvent(ev);
       if (ev.kind === "file_request" && ev.reqId) {
         // Execute the file op on the client and post the result back so the
         // blocked backend tool resumes. If no handler, report unavailable.

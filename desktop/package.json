@@ -39,6 +39,16 @@
     "appId": "com.merchantagent.desktop",
     "productName": "merchantAgent",
     "files": ["out/**"],
+    "extraResources": [
+      {
+        "from": "resources/capabilities/reference-manufacturing.cap.json",
+        "to": "capabilities/reference-manufacturing.cap.json"
+      },
+      {
+        "from": "resources/capabilities/reference-public.pem",
+        "to": "capabilities/reference-public.pem"
+      }
+    ],
     "npmRebuild": true,
     "asarUnpack": ["node_modules/better-sqlite3/**/*"],
     "win": { "target": ["nsis"] },

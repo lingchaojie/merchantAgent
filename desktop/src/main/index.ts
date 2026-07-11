@@ -8,9 +8,13 @@ import fs from "node:fs";
 import { register } from "./ipc";
 import { Sandbox } from "./fsguard";
 import { spawnAgentd } from "./agentd";
+import { LocalToolExecutor } from "./local-tools/executor";
+import { verifyCapabilityPackage } from "./local-tools/package";
+import { ReferenceEnterpriseStore } from "./local-tools/store";
 import type { ChildProcess } from "node:child_process";
 
 let agentdChild: ChildProcess | null = null;
+let enterpriseStore: ReferenceEnterpriseStore | null = null;
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -47,9 +51,19 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  const root = process.env.AGENT_WORKSPACE || path.join(app.getPath("userData"), "workspace");
+  const dataDir = app.getPath("userData");
+  const root = process.env.AGENT_WORKSPACE || path.join(dataDir, "workspace");
   fs.mkdirSync(root, { recursive: true });
-  register(new Sandbox(root));
+  const capabilityDir = app.isPackaged
+    ? path.join(process.resourcesPath, "capabilities")
+    : path.join(__dirname, "../../resources/capabilities");
+  enterpriseStore = new ReferenceEnterpriseStore(path.join(dataDir, "reference-enterprise.db"));
+  const pkg = verifyCapabilityPackage(
+    path.join(capabilityDir, "reference-manufacturing.cap.json"),
+    path.join(capabilityDir, "reference-public.pem"),
+  );
+  const localToolExecutor = new LocalToolExecutor(pkg, enterpriseStore);
+  register(new Sandbox(root), localToolExecutor);
 
   agentdChild = spawnAgentd(); // null unless AGENTD_BIN set
   createWindow();
@@ -57,6 +71,11 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on("before-quit", () => {
+  enterpriseStore?.close();
+  enterpriseStore = null;
 });
 
 app.on("window-all-closed", () => {

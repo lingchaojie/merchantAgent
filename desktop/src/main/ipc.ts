@@ -5,6 +5,7 @@
 import { ipcMain, dialog } from "electron";
 import { Sandbox } from "./fsguard";
 import { client } from "./agentd";
+import type { LocalToolExecutor } from "./local-tools/executor";
 import {
   Channels,
   type ChatEvent,
@@ -14,6 +15,8 @@ import {
   type FsWriteReq,
   type AdminReq,
   type AdminResp,
+  type LocalToolRequest,
+  type LocalToolResponse,
 } from "../shared/contract";
 
 // handleFileRequest executes a backend file_request on the client via fsguard.
@@ -45,7 +48,38 @@ async function handleFileRequest(sandbox: Sandbox, ev: ChatEvent): Promise<{ con
   }
 }
 
-export function register(sandbox: Sandbox): void {
+async function handleLocalToolRequest(
+  executor: LocalToolExecutor,
+  request: LocalToolRequest,
+): Promise<LocalToolResponse> {
+  const response = await executor.execute(request, async (preview) => {
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      buttons: ["取消", "确认写入"],
+      defaultId: 0,
+      cancelId: 0,
+      message: "确认更新生产进度",
+      detail: [
+        `订单：${preview.orderId}`,
+        `工单：${preview.workOrderId}`,
+        `完成率：${preview.before.completionRate}% → ${preview.proposed.completionRate}%`,
+        `备注：${preview.proposed.note || "（无）"}`,
+      ].join("\n"),
+    });
+    return response === 1;
+  });
+  return {
+    data: response.data ? { ...response.data } : undefined,
+    meta: {
+      ...response.meta,
+      before: response.meta.before ? { ...response.meta.before } : undefined,
+      after: response.meta.after ? { ...response.meta.after } : undefined,
+    },
+    error: response.error,
+  };
+}
+
+export function register(sandbox: Sandbox, localToolExecutor: LocalToolExecutor): void {
   ipcMain.handle(Channels.login, (_e, req: LoginReq) => client.login(req.userId));
 
   // chat: proxy to agentd's SSE stream, forwarding each event to the renderer on
@@ -61,6 +95,7 @@ export function register(sandbox: Sandbox): void {
         if (!e.sender.isDestroyed()) e.sender.send(chan, ev);
       },
       (ev) => handleFileRequest(sandbox, ev),
+      (request) => handleLocalToolRequest(localToolExecutor, request),
     );
   });
 

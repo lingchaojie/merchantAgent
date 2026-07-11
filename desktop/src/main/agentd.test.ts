@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import os from "node:os";
 import { parseSSE, client } from "./agentd";
 import type { ChatEvent } from "../shared/contract";
 
@@ -92,5 +93,101 @@ describe("client.chat streaming", () => {
     expect(final).toBe("读完了");
     expect(onFile).toHaveBeenCalledOnce();
     expect(posted).toMatchObject({ reqId: "r1", content: "待办清单" });
+  });
+
+  it("handles a local_tool_request in main and posts its structured result", async () => {
+    const stream =
+      'event: local_tool_request\ndata: {"kind":"local_tool_request","reqId":"local-1","packageId":"reference-manufacturing","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"renderer-spoof","roleIds":["sales"],"skillId":"order-360","callId":"call-1","idempotencyKey":"idem-1","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
+      'event: done\ndata: {"text":"查询完成"}\n\n';
+    const posted: Record<string, unknown>[] = [];
+    let chatBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, opts?: { body?: string }) => {
+        const body = JSON.parse(opts?.body ?? "{}") as Record<string, unknown>;
+        if (String(url).endsWith("/chat/local-tool-result")) {
+          posted.push(body);
+          return { ok: true, json: async () => ({ ok: true }) } as unknown as Response;
+        }
+        chatBody = body;
+        return sseResponse(stream);
+      }),
+    );
+    const onEvent = vi.fn();
+    const onLocalTool = vi.fn().mockResolvedValue({
+      data: { orderId: "SO-1001", status: "生产中" },
+      meta: {
+        status: "succeeded",
+        executionId: "exec-1",
+        idempotencyKey: "idem-1",
+        confirmed: false,
+      },
+    });
+
+    const final = await client.chat(
+      { sessionId: "s", userId: "u_sales1", question: "查询订单" },
+      onEvent,
+      undefined,
+      onLocalTool,
+    );
+
+    expect(final).toBe("查询完成");
+    expect(chatBody).toMatchObject({ deviceId: os.hostname() });
+    expect(onLocalTool).toHaveBeenCalledOnce();
+    expect(onLocalTool).toHaveBeenCalledWith(expect.objectContaining({
+      reqId: "local-1",
+      deviceId: os.hostname(),
+      idempotencyKey: "idem-1",
+    }));
+    expect(onEvent).toHaveBeenCalledOnce();
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "done" }));
+    expect(posted).toEqual([{
+      reqId: "local-1",
+      data: { orderId: "SO-1001", status: "生产中" },
+      meta: {
+        status: "succeeded",
+        executionId: "exec-1",
+        idempotencyKey: "idem-1",
+        confirmed: false,
+      },
+      error: "",
+    }]);
+  });
+
+  it("posts a failed local result when the local handler throws and keeps reading", async () => {
+    const stream =
+      'event: local_tool_request\ndata: {"kind":"local_tool_request","reqId":"local-2","packageId":"reference-manufacturing","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"ignored","roleIds":["sales"],"skillId":"order-360","callId":"call-2","idempotencyKey":"idem-2","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
+      'event: done\ndata: {"text":"本地执行失败"}\n\n';
+    let posted: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, opts?: { body?: string }) => {
+        if (String(url).endsWith("/chat/local-tool-result")) {
+          posted = JSON.parse(opts?.body ?? "{}") as Record<string, unknown>;
+          return { ok: true, json: async () => ({ ok: true }) } as unknown as Response;
+        }
+        return sseResponse(stream);
+      }),
+    );
+
+    const final = await client.chat(
+      { sessionId: "s", userId: "u_sales1", question: "查询订单" },
+      () => {},
+      undefined,
+      async () => { throw new Error("handler boom"); },
+    );
+
+    expect(final).toBe("本地执行失败");
+    expect(posted).toMatchObject({
+      reqId: "local-2",
+      data: {},
+      meta: {
+        status: "failed",
+        executionId: expect.any(String),
+        idempotencyKey: "idem-2",
+        confirmed: false,
+      },
+      error: "handler boom",
+    });
   });
 });
