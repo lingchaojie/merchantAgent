@@ -31,5 +31,6 @@ Thumbs.db
 
 # Local tool state / secrets (never commit)
 .claude/settings.local.json
+.worktrees/
 *.env
 dev.env
