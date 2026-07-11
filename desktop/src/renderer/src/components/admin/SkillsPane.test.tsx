@@ -112,4 +112,5 @@ it("tool checkbox changes only allowedTools", () => {
 
 it("keeps checkbox rows as inline flex inside the admin pane", () => {
   expect(css).toMatch(/\.pane\s+\.chk\s*\{[^}]*display:\s*inline-flex;/s);
+  expect(css).toMatch(/\.pane\s+\.tool-choice\s*\{[^}]*align-items:\s*flex-start;/s);
 });
