@@ -474,26 +474,40 @@ func TestLLM_LocalExecutionAuditTerminalStates(t *testing.T) {
 		{name: "denied", allowed: false, wantStatus: "denied", wantDecision: "deny", wantCalls: 0},
 		{name: "source conflict", allowed: true, meta: connector.ExecutionMeta{Status: "source_conflict", ExecutionID: "e-conflict", IdempotencyKey: localAuditIdempotencyKey()}, err: &connector.ExecutionError{Message: "source_conflict", Meta: connector.ExecutionMeta{Status: "source_conflict", ExecutionID: "e-conflict", IdempotencyKey: localAuditIdempotencyKey()}}, wantStatus: "source_conflict", wantDecision: "allow", wantCalls: 1},
 		{name: "explicit failure", allowed: true, meta: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed", IdempotencyKey: localAuditIdempotencyKey()}, err: &connector.ExecutionError{Message: "failed", Meta: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed", IdempotencyKey: localAuditIdempotencyKey()}}, wantStatus: "failed", wantDecision: "allow", wantCalls: 1},
-		{name: "cancelled", allowed: true, meta: connector.ExecutionMeta{Status: "cancelled", ExecutionID: "e-cancelled", IdempotencyKey: localAuditIdempotencyKey()}, err: &connector.ExecutionError{Message: "cancelled", Meta: connector.ExecutionMeta{Status: "cancelled", ExecutionID: "e-cancelled", IdempotencyKey: localAuditIdempotencyKey()}}, wantStatus: "cancelled", wantDecision: "allow", wantCalls: 1},
-		{name: "timeout unknown", allowed: true, meta: connector.ExecutionMeta{Status: "unknown", ExecutionID: "e-timeout", IdempotencyKey: localAuditIdempotencyKey()}, err: errors.New("desktop execution timeout"), wantStatus: "unknown", wantDecision: "allow", wantCalls: 1},
+		{name: "bridge context cancellation", allowed: true, err: context.Canceled, wantStatus: "cancelled", wantDecision: "allow", wantCalls: 1},
+		{name: "bridge timeout unknown", allowed: true, meta: connector.ExecutionMeta{Status: "unknown", IdempotencyKey: localAuditIdempotencyKey()}, err: &connector.ExecutionError{Message: "local tool request timed out", Meta: connector.ExecutionMeta{Status: "unknown", IdempotencyKey: localAuditIdempotencyKey()}}, wantStatus: "unknown", wantDecision: "allow", wantCalls: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			data := map[string]any{connector.ExecutionMetaKey: tc.meta}
+			data := map[string]any{connector.ExecutionMetaKey: tc.meta, "unsafe": "must-not-reach-provider"}
 			tool := &localAuditTool{spec: localAuditSpec(), data: data, err: tc.err}
 			allow := map[string]bool{}
 			if tc.allowed {
 				allow["user:u1|invoker|tool:t/report_production_progress"] = true
 				allow["user:u1|viewer|business_record:t/order/SO-1001"] = true
 			}
-			agent, audit, _, _ := localAuditAgent(t, tool, fakeChecker{allow: allow})
-			_, _, _ = agent.Ask(connector.WithDeviceID(context.Background(), "DESKTOP-01"), org.Principal{TenantID: "t", UserID: "u1"}, nil, "更新进度", nil)
+			agent, audit, fp, _ := localAuditAgent(t, tool, fakeChecker{allow: allow})
+			var events []Event
+			_, _, _ = agent.Ask(connector.WithDeviceID(context.Background(), "DESKTOP-01"), org.Principal{TenantID: "t", UserID: "u1"}, nil, "更新进度", func(e Event) { events = append(events, e) })
 			entries := audit.Entries()
 			if len(entries) != 1 || entries[0].Status != tc.wantStatus || entries[0].Decision != tc.wantDecision {
 				t.Fatalf("audit = %+v, want one %s/%s entry", entries, tc.wantDecision, tc.wantStatus)
 			}
 			if tool.calls != tc.wantCalls {
 				t.Fatalf("tool calls = %d, want %d", tool.calls, tc.wantCalls)
+			}
+			if (tc.wantStatus == "cancelled" || tc.wantStatus == "unknown") && entries[0].ExecutionID != "" {
+				t.Fatalf("transport terminal invented execution id: %+v", entries[0])
+			}
+			for _, event := range events {
+				if event.Kind == "tool_result" {
+					t.Fatalf("terminal %s exposed unsafe result: %+v", tc.wantStatus, event.Data)
+				}
+			}
+			for _, message := range fp.Requests[len(fp.Requests)-1].Messages {
+				if message.Role == "tool" && strings.Contains(message.Content, "must-not-reach-provider") {
+					t.Fatalf("terminal %s leaked unsafe result to provider: %s", tc.wantStatus, message.Content)
+				}
 			}
 			if !audit.Verify() {
 				t.Fatal("audit chain did not verify")

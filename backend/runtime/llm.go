@@ -483,6 +483,19 @@ func executionStatus(err error, meta connector.ExecutionMeta) string {
 
 func validateDesktopExecution(spec connector.ToolSpec, invocation connector.InvocationMeta, meta connector.ExecutionMeta, invokeErr error) (connector.ExecutionMeta, string, error) {
 	expectedKey := connector.ExpectedIdempotencyKey(invocation, spec.Name)
+	transportTerminal := ""
+	switch {
+	case errors.Is(invokeErr, context.Canceled):
+		transportTerminal = "cancelled"
+	case errors.Is(invokeErr, context.DeadlineExceeded):
+		transportTerminal = "unknown"
+	case invokeErr != nil && strings.TrimSpace(meta.ExecutionID) == "" && (meta.Status == "cancelled" || meta.Status == "unknown"):
+		transportTerminal = meta.Status
+	}
+	if transportTerminal != "" {
+		return connector.ExecutionMeta{Status: transportTerminal, IdempotencyKey: expectedKey}, transportTerminal,
+			errors.New("local bridge ended before execution identity was available")
+	}
 	invalid := func(reason string) (connector.ExecutionMeta, string, error) {
 		status := "unknown"
 		if invokeErr != nil {
