@@ -11,12 +11,11 @@ import { spawnAgentd } from "./agentd";
 import { LocalToolExecutor } from "./local-tools/executor";
 import { verifyCapabilityPackage } from "./local-tools/package";
 import { ReferenceEnterpriseStore } from "./local-tools/store";
-import type { ChildProcess } from "node:child_process";
+import { initializeDesktop, type DesktopRuntime } from "./startup";
 
-let agentdChild: ChildProcess | null = null;
-let enterpriseStore: ReferenceEnterpriseStore | null = null;
+let desktopRuntime: DesktopRuntime | null = null;
 
-function createWindow(): void {
+async function createWindow(): Promise<void> {
   const win = new BrowserWindow({
     width: 1000,
     height: 720,
@@ -43,43 +42,55 @@ function createWindow(): void {
 
   // electron-vite injects ELECTRON_RENDERER_URL in dev; load the built file in prod.
   const devUrl = process.env["ELECTRON_RENDERER_URL"];
-  if (devUrl) {
-    win.loadURL(devUrl);
-  } else {
-    win.loadFile(path.join(__dirname, "../renderer/index.html"));
+  try {
+    if (devUrl) {
+      await win.loadURL(devUrl);
+    } else {
+      await win.loadFile(path.join(__dirname, "../renderer/index.html"));
+    }
+  } catch (error) {
+    win.destroy();
+    throw error;
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const dataDir = app.getPath("userData");
   const root = process.env.AGENT_WORKSPACE || path.join(dataDir, "workspace");
   fs.mkdirSync(root, { recursive: true });
   const capabilityDir = app.isPackaged
     ? path.join(process.resourcesPath, "capabilities")
     : path.join(__dirname, "../../resources/capabilities");
-  enterpriseStore = new ReferenceEnterpriseStore(path.join(dataDir, "reference-enterprise.db"));
-  const pkg = verifyCapabilityPackage(
-    path.join(capabilityDir, "reference-manufacturing.cap.json"),
-    path.join(capabilityDir, "reference-public.pem"),
-  );
-  const localToolExecutor = new LocalToolExecutor(pkg, enterpriseStore);
-  register(new Sandbox(root), localToolExecutor);
-
-  agentdChild = spawnAgentd(); // null unless AGENTD_BIN set
-  createWindow();
+  desktopRuntime = await initializeDesktop({
+    createStore: () => new ReferenceEnterpriseStore(path.join(dataDir, "reference-enterprise.db")),
+    verifyPackage: () => verifyCapabilityPackage(
+      path.join(capabilityDir, "reference-manufacturing.cap.json"),
+      path.join(capabilityDir, "reference-public.pem"),
+    ),
+    createExecutor: (pkg, store) => new LocalToolExecutor(pkg, store),
+    register: (executor) => register(new Sandbox(root), executor),
+    spawnAgentd,
+    createWindow,
+  });
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      void createWindow().catch((error) => console.error("failed to create window", error));
+    }
   });
+}).catch((error) => {
+  console.error("desktop startup failed", error);
+  app.quit();
 });
 
 app.on("before-quit", () => {
-  enterpriseStore?.close();
-  enterpriseStore = null;
+  const runtime = desktopRuntime;
+  desktopRuntime = null;
+  runtime?.close();
 });
 
 app.on("window-all-closed", () => {
-  agentdChild?.kill();
+  desktopRuntime?.stopAgentd();
   if (process.platform !== "darwin") app.quit();
 });
 

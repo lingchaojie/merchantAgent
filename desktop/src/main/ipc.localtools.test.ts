@@ -3,7 +3,7 @@ import type { LocalToolRequest } from "../shared/contract";
 
 const electron = vi.hoisted(() => ({
   dialog: { showMessageBox: vi.fn() },
-  ipcMain: { handle: vi.fn() },
+  ipcMain: { handle: vi.fn(), removeHandler: vi.fn() },
 }));
 const agentd = vi.hoisted(() => ({
   client: { login: vi.fn(), chat: vi.fn(), adminRequest: vi.fn() },
@@ -130,5 +130,32 @@ describe("local tool confirmation in Electron main", () => {
     expect(response).toMatchObject({ meta: { status: "succeeded", confirmed: true } });
     expect(executor.execute).toHaveBeenCalledOnce();
     expect(executor.writes).toBe(1);
+  });
+
+  it("removes partially installed IPC handlers when registration throws", () => {
+    electron.ipcMain.handle
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw new Error("registration failed"); });
+
+    expect(() => register({} as never, fakeExecutor() as never)).toThrow("registration failed");
+
+    expect(electron.ipcMain.removeHandler).toHaveBeenCalledOnce();
+    expect(electron.ipcMain.removeHandler).toHaveBeenCalledWith(Channels.login);
+  });
+
+  it("returns an idempotent cleanup for successfully installed IPC handlers", () => {
+    const cleanup = register({} as never, fakeExecutor() as never);
+
+    cleanup();
+    cleanup();
+
+    expect(electron.ipcMain.removeHandler).toHaveBeenCalledTimes(5);
+    expect(electron.ipcMain.removeHandler.mock.calls.map(([channel]) => channel)).toEqual([
+      Channels.admin,
+      Channels.fsWrite,
+      Channels.fsRead,
+      Channels.chat,
+      Channels.login,
+    ]);
   });
 });

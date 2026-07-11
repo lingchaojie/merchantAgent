@@ -190,4 +190,103 @@ describe("client.chat streaming", () => {
       error: "handler boom",
     });
   });
+
+  it("keeps reading through done when the local result POST is rejected", async () => {
+    const stream =
+      'event: local_tool_request\ndata: {"reqId":"local-network","packageId":"reference-manufacturing","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"ignored","roleIds":["sales"],"skillId":"order-360","callId":"call-network","idempotencyKey":"idem-network","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
+      'event: done\ndata: {"text":"流继续完成"}\n\n';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith("/chat/local-tool-result")) throw new Error("network unavailable");
+        return sseResponse(stream);
+      }),
+    );
+    const onEvent = vi.fn();
+
+    const final = await client.chat(
+      { sessionId: "s", userId: "u_sales1", question: "查询订单" },
+      onEvent,
+      undefined,
+      async () => ({
+        data: { orderId: "SO-1001" },
+        meta: {
+          status: "succeeded",
+          executionId: "exec-network",
+          idempotencyKey: "idem-network",
+          confirmed: false,
+        },
+      }),
+    );
+
+    expect(final).toBe("流继续完成");
+    expect(onEvent).toHaveBeenCalledOnce();
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "done" }));
+  });
+
+  it("surfaces a later backend error instead of a local result POST non-2xx", async () => {
+    const stream =
+      'event: local_tool_request\ndata: {"reqId":"local-expired","packageId":"reference-manufacturing","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"ignored","roleIds":["sales"],"skillId":"order-360","callId":"call-expired","idempotencyKey":"idem-expired","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
+      'event: error\ndata: {"error":"backend request expired"}\n\n';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith("/chat/local-tool-result")) {
+          return {
+            ok: false,
+            status: 404,
+            text: async () => "unknown or expired reqId",
+          } as unknown as Response;
+        }
+        return sseResponse(stream);
+      }),
+    );
+
+    await expect(client.chat(
+      { sessionId: "s", userId: "u_sales1", question: "查询订单" },
+      () => {},
+      undefined,
+      async () => ({
+        data: { orderId: "SO-1001" },
+        meta: {
+          status: "succeeded",
+          executionId: "exec-expired",
+          idempotencyKey: "idem-expired",
+          confirmed: false,
+        },
+      }),
+    )).rejects.toThrow("backend request expired");
+  });
+
+  it("keeps reading when a successful local result POST has malformed JSON", async () => {
+    const stream =
+      'event: local_tool_request\ndata: {"reqId":"local-json","packageId":"reference-manufacturing","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"ignored","roleIds":["sales"],"skillId":"order-360","callId":"call-json","idempotencyKey":"idem-json","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
+      'event: done\ndata: {"text":"解析失败后完成"}\n\n';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith("/chat/local-tool-result")) {
+          return { ok: true, json: async () => { throw new SyntaxError("bad json"); } } as unknown as Response;
+        }
+        return sseResponse(stream);
+      }),
+    );
+
+    const final = await client.chat(
+      { sessionId: "s", userId: "u_sales1", question: "查询订单" },
+      () => {},
+      undefined,
+      async () => ({
+        data: { orderId: "SO-1001" },
+        meta: {
+          status: "succeeded",
+          executionId: "exec-json",
+          idempotencyKey: "idem-json",
+          confirmed: false,
+        },
+      }),
+    );
+
+    expect(final).toBe("解析失败后完成");
+  });
 });

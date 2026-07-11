@@ -98,12 +98,17 @@ async function chat(
             error: error instanceof Error ? error.message : String(error),
           };
         }
-        await post("/chat/local-tool-result", {
-          reqId: request.reqId,
-          data: out.data ?? {},
-          meta: out.meta,
-          error: out.error ?? "",
-        });
+        try {
+          await post("/chat/local-tool-result", {
+            reqId: request.reqId,
+            data: out.data ?? {},
+            meta: out.meta,
+            error: out.error ?? "",
+          });
+        } catch {
+          // The SSE stream owns the authoritative terminal state. A lost or
+          // expired acknowledgement must not hide a later backend error/done.
+        }
         continue;
       }
       onEvent(ev);
