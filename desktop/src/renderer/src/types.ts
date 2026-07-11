@@ -48,7 +48,26 @@ const TOOL_LABEL: Record<string, string> = {
   query_customer_contacts: "客户联系人",
   query_customer_followups: "客户跟进",
   query_customer_opportunities: "客户商机",
+  report_production_progress: "生产进度",
 };
+
+function executionStatusText(tool: string | undefined, status: unknown): string {
+  const label = TOOL_LABEL[tool ?? ""] ?? tool ?? "本地工具";
+  switch (status) {
+    case "executing":
+      return `正在执行 ${label}…`;
+    case "succeeded":
+      return `${label}执行成功（已验证）`;
+    case "failed":
+      return `${label}执行失败`;
+    case "cancelled":
+      return `${label}执行已取消`;
+    case "source_conflict":
+      return `${label}数据已变化，请重试`;
+    default:
+      return `${label}结果待确认`;
+  }
+}
 
 // foldEvent folds one streamed ChatEvent into the in-flight assistant message.
 // tool_result data + tool name drive the ResultCard; final sets the text; a
@@ -61,6 +80,8 @@ export function foldEvent(m: Message, e: ChatEvent): Message {
       return { ...m, status: `已加载技能 ${e.tool ?? ""}` };
     case "tool_result":
       return { ...m, tool: e.tool, data: e.data, denied: false, status: undefined };
+    case "tool_state":
+      return { ...m, status: executionStatusText(e.tool, e.data?.status) };
     case "denied":
       return { ...m, denied: m.data ? m.denied : true, status: undefined };
     case "assistant":

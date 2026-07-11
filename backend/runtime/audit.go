@@ -15,17 +15,31 @@ import (
 // AuditEntry is one recorded agent action. Entries are hash-chained: each
 // entry's Hash covers the previous Hash, so any tampering breaks the chain.
 type AuditEntry struct {
-	Seq      int            `json:"seq"`
-	Time     time.Time      `json:"time"`
-	TenantID string         `json:"tenantId"`
-	UserID   string         `json:"userId"`
-	Question string         `json:"question"`
-	Tool     string         `json:"tool"`
-	Args     map[string]any `json:"args"`
-	Decision string         `json:"decision"` // "allow" | "deny"
-	Reason   string         `json:"reason"`
-	PrevHash string         `json:"prevHash"`
-	Hash     string         `json:"hash"`
+	Seq               int            `json:"seq"`
+	Time              time.Time      `json:"time"`
+	TenantID          string         `json:"tenantId"`
+	UserID            string         `json:"userId"`
+	Question          string         `json:"question"`
+	SkillID           string         `json:"skillId,omitempty"`
+	RoleIDs           []string       `json:"roleIds,omitempty"`
+	DeviceID          string         `json:"deviceId,omitempty"`
+	Tool              string         `json:"tool"`
+	ToolVersion       string         `json:"toolVersion,omitempty"`
+	ExecutionLocation string         `json:"executionLocation,omitempty"`
+	Risk              string         `json:"risk,omitempty"`
+	Args              map[string]any `json:"args"`
+	Decision          string         `json:"decision"` // "allow" | "deny"
+	Status            string         `json:"status,omitempty"`
+	Reason            string         `json:"reason"`
+	ExecutionID       string         `json:"executionId,omitempty"`
+	IdempotencyKey    string         `json:"idempotencyKey,omitempty"`
+	Confirmed         bool           `json:"confirmed"`
+	ConfirmedAt       string         `json:"confirmedAt,omitempty"`
+	ResourceID        string         `json:"resourceId,omitempty"`
+	Before            map[string]any `json:"before,omitempty"`
+	After             map[string]any `json:"after,omitempty"`
+	PrevHash          string         `json:"prevHash"`
+	Hash              string         `json:"hash"`
 }
 
 // Appender records audit entries. *AuditLog (single chain) and *TenantAudit

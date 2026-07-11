@@ -2,6 +2,7 @@ package wire
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/merchantagent/backend/org"
@@ -13,6 +14,16 @@ type fakeLister struct{ objs []string }
 
 func (f fakeLister) ListObjects(_ context.Context, _, _, _ string) ([]string, error) {
 	return f.objs, nil
+}
+
+type recordingLister struct {
+	user, relation, typ string
+	objects             []string
+}
+
+func (f *recordingLister) ListObjects(_ context.Context, user, relation, typ string) ([]string, error) {
+	f.user, f.relation, f.typ = user, relation, typ
+	return f.objects, nil
 }
 
 func TestResolver_IntersectsRegistryWithUsableBy(t *testing.T) {
@@ -53,5 +64,27 @@ func TestResolver_EmptyWhenNoUsable(t *testing.T) {
 func TestSkillIDFromObject(t *testing.T) {
 	if got := skillIDFromObject("skill:mock-corp-001/order360"); got != "order360" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestResolver_RoleIDsAreTenantScopedAndSorted(t *testing.T) {
+	store, err := skill.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	lister := &recordingLister{objects: []string{
+		"role:mock-corp-001/sales", "role:other/planner", "role:mock-corp-001/planner",
+	}}
+	r := NewResolver(lister, store, "mock-corp-001")
+	got, err := r.RoleIDs(context.Background(), org.Principal{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lister.user != "user:u1" || lister.relation != "assignee" || lister.typ != "role" {
+		t.Fatalf("ListObjects called with %q, %q, %q", lister.user, lister.relation, lister.typ)
+	}
+	if want := []string{"planner", "sales"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("RoleIDs = %v, want %v", got, want)
 	}
 }

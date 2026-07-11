@@ -6,6 +6,7 @@ package wire
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"github.com/merchantagent/backend/org"
@@ -19,6 +20,25 @@ import (
 // real capability pre-filter (design §4.1).
 type SkillLister interface {
 	ListObjects(ctx context.Context, user, relation, typ string) ([]string, error)
+}
+
+// RoleIDs resolves the caller's current tenant roles once per turn. OpenFGA
+// returns fully-qualified objects; only this resolver's tenant namespace is
+// accepted before ids are sorted for deterministic invocation metadata.
+func (r *Resolver) RoleIDs(ctx context.Context, p org.Principal) ([]string, error) {
+	objects, err := r.lister.ListObjects(ctx, "user:"+p.UserID, "assignee", "role")
+	if err != nil {
+		return nil, err
+	}
+	prefix := "role:" + r.tenant + "/"
+	roles := make([]string, 0, len(objects))
+	for _, object := range objects {
+		if strings.HasPrefix(object, prefix) {
+			roles = append(roles, strings.TrimPrefix(object, prefix))
+		}
+	}
+	sort.Strings(roles)
+	return roles, nil
 }
 
 // Resolver implements runtime.SkillResolver by intersecting the OpenFGA

@@ -59,5 +59,17 @@ export function ResultCard({ tool, data }: { tool?: string; data?: Data }): JSX.
     );
   }
 
+  if (tool === "report_production_progress") {
+    return (
+      <div className="card">
+        <div className="card-head"><IconChart width={14} height={14} /> 生产进度 · {String(data.orderId)}</div>
+        <div className="card-row"><span className="badge green">已验证</span></div>
+        <Row k="工单" v={data.workOrderId} />
+        <Row k="完成率" v={`${String(data.completionRate)}%`} accent="green" />
+        <Row k="备注" v={data.note || "-"} />
+      </div>
+    );
+  }
+
   return null;
 }

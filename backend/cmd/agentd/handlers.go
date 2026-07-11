@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -90,17 +91,57 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAudit returns the hash-chained audit log for a tenant (?tenant=…,
-// defaults to the server's tenant) and whether it verifies.
+// defaults to the server's tenant) and whether it verifies. The desktop injects
+// X-User-Id from the current identity; production derives it from a session.
 func (s *server) handleAudit(w http.ResponseWriter, r *http.Request) {
-	tenant := r.URL.Query().Get("tenant")
-	if tenant == "" {
-		tenant = s.tenant
+	serveAudit(w, r, s.tenant, s.asm.Audit, s.asm.IDP, s.asm.Store)
+}
+
+type auditIdentityProvider interface {
+	Authenticate(context.Context, org.LoginContext) (org.Principal, error)
+}
+
+func serveAudit(w http.ResponseWriter, r *http.Request, tenant string, audit *runtime.TenantAudit, idp auditIdentityProvider, checker adminChecker) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
 	}
-	chain := s.asm.Audit.Chain(tenant)
+	uid := r.Header.Get("X-User-Id")
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing X-User-Id"})
+		return
+	}
+	principal, err := idp.Authenticate(r.Context(), org.LoginContext{Credential: uid})
+	if err != nil || principal.TenantID != tenant || principal.UserID != uid {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "tenant member only"})
+		return
+	}
+	requestedTenant := r.URL.Query().Get("tenant")
+	if requestedTenant != "" && requestedTenant != tenant {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-tenant audit access denied"})
+		return
+	}
+	isAdmin, err := checker.Check(r.Context(), "user:"+uid, "admin", "tenant:"+tenant)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	chain := audit.Chain(tenant)
+	entries := chain.Entries()
+	if !isAdmin {
+		own := make([]runtime.AuditEntry, 0, len(entries))
+		for _, entry := range entries {
+			if entry.UserID == uid {
+				own = append(own, entry)
+			}
+		}
+		entries = own
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant":   tenant,
 		"verified": chain.Verify(),
-		"entries":  chain.Entries(),
+		"entries":  entries,
 	})
 }
 

@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -73,15 +75,16 @@ func TestDispatchRejectsUnknownArgsBeforeGuardAndInvoke(t *testing.T) {
 		guard: NewGuard(checker, "t"),
 		tools: map[string]connector.Tool{"update_order": tool},
 	}
-	available := map[string]bool{"update_order": true}
+	unlockedBy := map[string]string{"update_order": "test-skill"}
 	var toolDefs []provider.ToolDef
 	result := agent.dispatch(
 		context.Background(),
 		org.Principal{TenantID: "t", UserID: "u1"},
 		provider.Call("c1", "update_order", map[string]any{"orderId": "SO-1001", "sql": "DROP"}).ToolCalls[0],
 		nil,
-		available,
+		unlockedBy,
 		&toolDefs,
+		turnMeta{},
 		nil,
 	)
 
@@ -124,8 +127,9 @@ func TestDispatchRejectsUnknownAmbientArgsBeforeBridge(t *testing.T) {
 			"path": "notes.txt", "content": "hello", "sql": "DROP",
 		}).ToolCalls[0],
 		nil,
-		map[string]bool{"write_local_file": true},
+		map[string]string{"write_local_file": ""},
 		&toolDefs,
+		turnMeta{},
 		nil,
 	)
 
@@ -192,6 +196,251 @@ type fakeResolver struct{ skills []SkillInfo }
 
 func (f fakeResolver) UsableSkills(context.Context, org.Principal) ([]SkillInfo, error) {
 	return f.skills, nil
+}
+
+type localAuditResolver struct {
+	skills    []SkillInfo
+	roles     []string
+	roleCalls int
+}
+
+func (r *localAuditResolver) UsableSkills(context.Context, org.Principal) ([]SkillInfo, error) {
+	return r.skills, nil
+}
+
+func (r *localAuditResolver) RoleIDs(context.Context, org.Principal) ([]string, error) {
+	r.roleCalls++
+	return append([]string(nil), r.roles...), nil
+}
+
+type localAuditTool struct {
+	spec       connector.ToolSpec
+	data       map[string]any
+	err        error
+	invocation connector.InvocationMeta
+	calls      int
+}
+
+func (t *localAuditTool) Spec() connector.ToolSpec { return t.spec }
+
+func (t *localAuditTool) Invoke(ctx context.Context, _ map[string]any) (map[string]any, error) {
+	t.calls++
+	t.invocation, _ = connector.InvocationFrom(ctx)
+	out := map[string]any{}
+	for k, v := range t.data {
+		out[k] = v
+	}
+	return out, t.err
+}
+
+func localAuditSpec() connector.ToolSpec {
+	return connector.ToolSpec{
+		PackageID: "reference-manufacturing", Version: "1.0.0",
+		Name: "report_production_progress", Description: "更新生产进度",
+		Params: []connector.ParamSpec{
+			{Name: "orderId", Required: true},
+			{Name: "workOrderId", Required: true},
+			{Name: "completionRate", Type: connector.ParamInteger, Required: true},
+			{Name: "expectedVersion", Type: connector.ParamInteger, Required: true},
+		},
+		ResourceType: "business_record", ResourceKind: "order", ResourceArg: "orderId",
+		Execution: connector.ExecutionDesktop, Risk: connector.RiskLowWrite,
+		ResultFields: []string{"orderId", "workOrderId", "completionRate", "note", "version"},
+	}
+}
+
+func localAuditAgent(t *testing.T, tool *localAuditTool, chk Checker) (*LLMAgent, *AuditLog, *provider.Fake, *localAuditResolver) {
+	t.Helper()
+	fp := &provider.Fake{Steps: []provider.Message{
+		provider.Call("load-1", "load_skill", map[string]any{"skillId": "production-progress"}),
+		provider.Call("exec-1", "report_production_progress", map[string]any{
+			"orderId": "SO-1001", "workOrderId": "WO-1001", "completionRate": 80, "expectedVersion": 1,
+		}),
+		provider.Text("进度已更新。"),
+	}}
+	resolver := &localAuditResolver{
+		skills: []SkillInfo{{
+			ID: "production-progress", Name: "生产进度", PlaybookMD: "更新进度",
+			AllowedTools: []string{"report_production_progress"},
+		}},
+		roles: []string{"sales", "planner"},
+	}
+	audit := NewAuditLog()
+	agent := NewLLMAgent(fp, []connector.Connector{stubConn{tools: []connector.Tool{tool}}}, NewGuard(chk, "t"), resolver, audit, "t")
+	return agent, audit, fp, resolver
+}
+
+func TestLLM_LocalExecutionAuditSucceededAndRedacted(t *testing.T) {
+	meta := connector.ExecutionMeta{
+		Status: "succeeded", ExecutionID: "desktop-exec-1", IdempotencyKey: "idem-1",
+		Confirmed: true, ConfirmedAt: "2026-07-12T10:00:00Z",
+		Before: map[string]any{"completionRate": float64(60)},
+		After:  map[string]any{"completionRate": float64(80)},
+	}
+	tool := &localAuditTool{spec: localAuditSpec(), data: map[string]any{
+		"orderId": "SO-1001", "workOrderId": "WO-1001", "completionRate": float64(80),
+		"note": "等待质检", "version": float64(2), "internalSql": "UPDATE production",
+		connector.ExecutionMetaKey: meta,
+	}}
+	chk := fakeChecker{allow: map[string]bool{
+		"user:u1|invoker|tool:t/report_production_progress": true,
+		"user:u1|viewer|business_record:t/order/SO-1001":    true,
+	}}
+	agent, audit, fp, resolver := localAuditAgent(t, tool, chk)
+	ctx := connector.WithDeviceID(context.Background(), "DESKTOP-01")
+	var events []Event
+	if _, _, err := agent.Ask(ctx, org.Principal{TenantID: "t", UserID: "u1"}, nil, "更新进度", func(e Event) {
+		events = append(events, e)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if resolver.roleCalls != 1 {
+		t.Fatalf("RoleIDs called %d times, want once per turn", resolver.roleCalls)
+	}
+	wantInvocation := connector.InvocationMeta{
+		TenantID: "t", UserID: "u1", SkillID: "production-progress", CallID: "exec-1",
+		DeviceID: "DESKTOP-01", RoleIDs: []string{"planner", "sales"},
+	}
+	if !reflect.DeepEqual(tool.invocation, wantInvocation) {
+		t.Fatalf("invocation = %+v, want %+v", tool.invocation, wantInvocation)
+	}
+	entries := audit.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.SkillID != "production-progress" || !reflect.DeepEqual(e.RoleIDs, []string{"planner", "sales"}) || e.DeviceID != "DESKTOP-01" ||
+		e.Tool != "report_production_progress" || e.ToolVersion != "1.0.0" || e.ExecutionLocation != "desktop" || e.Risk != "low_write" ||
+		e.Decision != "allow" || e.Status != "succeeded" || e.ExecutionID != "desktop-exec-1" || e.IdempotencyKey != "idem-1" ||
+		!e.Confirmed || e.ConfirmedAt != "2026-07-12T10:00:00Z" || e.ResourceID != "SO-1001" ||
+		!reflect.DeepEqual(e.Before, meta.Before) || !reflect.DeepEqual(e.After, meta.After) {
+		t.Fatalf("audit entry missing lifecycle metadata: %+v", e)
+	}
+	if !audit.Verify() {
+		t.Fatal("audit chain did not verify")
+	}
+
+	var result map[string]any
+	var states []string
+	for _, event := range events {
+		if event.Kind == "tool_result" {
+			result = event.Data
+		}
+		if event.Kind == "tool_state" {
+			states = append(states, event.Data["status"].(string))
+		}
+	}
+	if !reflect.DeepEqual(states, []string{"executing", "succeeded"}) {
+		t.Fatalf("tool states = %v", states)
+	}
+	if _, ok := result[connector.ExecutionMetaKey]; ok {
+		t.Fatalf("reserved metadata leaked to renderer: %+v", result)
+	}
+	if _, ok := result["internalSql"]; ok {
+		t.Fatalf("non-allowlisted field leaked to renderer: %+v", result)
+	}
+	lastRequest := fp.Requests[len(fp.Requests)-1]
+	for _, message := range lastRequest.Messages {
+		if message.Role == "tool" && (strings.Contains(message.Content, "desktop-exec-1") || strings.Contains(message.Content, "internalSql") || strings.Contains(message.Content, "before")) {
+			t.Fatalf("private execution metadata leaked to provider: %s", message.Content)
+		}
+	}
+}
+
+func TestLLM_LocalExecutionAuditTerminalStates(t *testing.T) {
+	cases := []struct {
+		name         string
+		allowed      bool
+		meta         connector.ExecutionMeta
+		err          error
+		wantStatus   string
+		wantDecision string
+		wantCalls    int
+	}{
+		{name: "denied", allowed: false, wantStatus: "denied", wantDecision: "deny", wantCalls: 0},
+		{name: "source conflict", allowed: true, meta: connector.ExecutionMeta{Status: "source_conflict", ExecutionID: "e-conflict"}, err: &connector.ExecutionError{Message: "source_conflict", Meta: connector.ExecutionMeta{Status: "source_conflict", ExecutionID: "e-conflict"}}, wantStatus: "source_conflict", wantDecision: "allow", wantCalls: 1},
+		{name: "explicit failure", allowed: true, meta: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed"}, err: &connector.ExecutionError{Message: "failed", Meta: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed"}}, wantStatus: "failed", wantDecision: "allow", wantCalls: 1},
+		{name: "cancelled", allowed: true, meta: connector.ExecutionMeta{Status: "cancelled", ExecutionID: "e-cancelled"}, err: &connector.ExecutionError{Message: "cancelled", Meta: connector.ExecutionMeta{Status: "cancelled", ExecutionID: "e-cancelled"}}, wantStatus: "cancelled", wantDecision: "allow", wantCalls: 1},
+		{name: "timeout unknown", allowed: true, meta: connector.ExecutionMeta{Status: "unknown", IdempotencyKey: "idem-timeout"}, err: errors.New("desktop execution timeout"), wantStatus: "unknown", wantDecision: "allow", wantCalls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := map[string]any{connector.ExecutionMetaKey: tc.meta}
+			tool := &localAuditTool{spec: localAuditSpec(), data: data, err: tc.err}
+			allow := map[string]bool{}
+			if tc.allowed {
+				allow["user:u1|invoker|tool:t/report_production_progress"] = true
+				allow["user:u1|viewer|business_record:t/order/SO-1001"] = true
+			}
+			agent, audit, _, _ := localAuditAgent(t, tool, fakeChecker{allow: allow})
+			_, _, _ = agent.Ask(connector.WithDeviceID(context.Background(), "DESKTOP-01"), org.Principal{TenantID: "t", UserID: "u1"}, nil, "更新进度", nil)
+			entries := audit.Entries()
+			if len(entries) != 1 || entries[0].Status != tc.wantStatus || entries[0].Decision != tc.wantDecision {
+				t.Fatalf("audit = %+v, want one %s/%s entry", entries, tc.wantDecision, tc.wantStatus)
+			}
+			if tool.calls != tc.wantCalls {
+				t.Fatalf("tool calls = %d, want %d", tool.calls, tc.wantCalls)
+			}
+			if !audit.Verify() {
+				t.Fatal("audit chain did not verify")
+			}
+		})
+	}
+}
+
+func TestLLM_LocalExecutionWithoutResultAllowlistReturnsNoData(t *testing.T) {
+	tool := &localAuditTool{spec: localAuditSpec(), data: map[string]any{
+		"orderId": "SO-1001", "executionId": "must-not-leak",
+		connector.ExecutionMetaKey: connector.ExecutionMeta{Status: "succeeded"},
+	}}
+	tool.spec.ResultFields = nil
+	chk := fakeChecker{allow: map[string]bool{
+		"user:u1|invoker|tool:t/report_production_progress": true,
+		"user:u1|viewer|business_record:t/order/SO-1001":    true,
+	}}
+	agent, _, fp, _ := localAuditAgent(t, tool, chk)
+	var result map[string]any
+	if _, _, err := agent.Ask(context.Background(), org.Principal{TenantID: "t", UserID: "u1"}, nil, "更新进度", func(e Event) {
+		if e.Kind == "tool_result" {
+			result = e.Data
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("desktop result without allowlist leaked data: %+v", result)
+	}
+	lastRequest := fp.Requests[len(fp.Requests)-1]
+	for _, message := range lastRequest.Messages {
+		if message.Role == "tool" && message.ToolCallID == "exec-1" && message.Content != "{}" {
+			t.Fatalf("provider received unallowlisted desktop result: %s", message.Content)
+		}
+	}
+}
+
+func TestLLM_LocalExecutionFailedMetadataWithoutErrorDoesNotEmitResult(t *testing.T) {
+	tool := &localAuditTool{spec: localAuditSpec(), data: map[string]any{
+		"orderId": "SO-1001", "completionRate": float64(80),
+		connector.ExecutionMetaKey: connector.ExecutionMeta{Status: "failed", ExecutionID: "e-failed"},
+	}}
+	chk := fakeChecker{allow: map[string]bool{
+		"user:u1|invoker|tool:t/report_production_progress": true,
+		"user:u1|viewer|business_record:t/order/SO-1001":    true,
+	}}
+	agent, audit, _, _ := localAuditAgent(t, tool, chk)
+	emittedResult := false
+	if _, _, err := agent.Ask(context.Background(), org.Principal{TenantID: "t", UserID: "u1"}, nil, "更新进度", func(e Event) {
+		emittedResult = emittedResult || e.Kind == "tool_result"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if emittedResult {
+		t.Fatal("failed execution metadata emitted a tool result")
+	}
+	if entries := audit.Entries(); len(entries) != 1 || entries[0].Status != "failed" {
+		t.Fatalf("audit = %+v, want one failed entry", entries)
+	}
 }
 
 func orderStatusTool() connector.Tool {
