@@ -53,10 +53,20 @@ export function SkillEditor({
       </label>
       <fieldset><legend>工具</legend>
         {tools.map((tool) => (
-          <label key={tool.name} className="chk">
+          <label key={tool.name} className="chk tool-choice">
             <input type="checkbox" checked={skill.allowedTools.includes(tool.name)} disabled={busy}
               onChange={() => update("allowedTools", toggle(skill.allowedTools, tool.name))} />
-            {tool.name}{tool.dataDomain ? <span className="warn"> ⚠ {tool.dataDomain}</span> : null}
+            <span className="tool-choice-details">
+              <span>{tool.name}{tool.dataDomain ? <span className="warn"> ⚠ {tool.dataDomain}</span> : null}</span>
+              <span className="tool-meta">
+                {(tool.packageId || tool.version) && (
+                  <code>{tool.packageId}{tool.packageId && tool.version ? "@" : ""}{tool.version}</code>
+                )}
+                <span>{tool.execution === "desktop" ? "本地执行" : "服务端执行"}</span>
+                <span>{tool.risk === "low_write" ? "低风险写入" : tool.risk === "high_write" ? "高风险写入" : "只读"}</span>
+                {tool.requiresConfirmation && <span>需确认</span>}
+              </span>
+            </span>
           </label>
         ))}
       </fieldset>
