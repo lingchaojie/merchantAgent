@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 import type { Skill, ToolInfo } from "../../admin";
 import { SkillEditor } from "./SkillsPane";
+
+const css = readFileSync(new URL("../../app.css", import.meta.url), "utf8");
 
 it("renders every editable skill field and supplied domains", () => {
   const html = renderToStaticMarkup(
@@ -105,4 +108,8 @@ it("tool checkbox changes only allowedTools", () => {
     ...skill,
     allowedTools: ["report_production_progress"],
   });
+});
+
+it("keeps checkbox rows as inline flex inside the admin pane", () => {
+  expect(css).toMatch(/\.pane\s+\.chk\s*\{[^}]*display:\s*inline-flex;/s);
 });

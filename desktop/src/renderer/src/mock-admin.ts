@@ -35,11 +35,11 @@ const SEED_GRANTS: Grant[] = [
 ];
 
 const SEED_TOOLS: ToolInfo[] = [
-  { name: "check_material_kitting", description: "查询齐套/欠料", dataDomain: "orders", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
-  { name: "query_customer_contacts", description: "查询客户联系人", dataDomain: "customer", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
-  { name: "query_customer_followups", description: "查询客户跟进", dataDomain: "customer", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
-  { name: "query_customer_opportunities", description: "查询客户商机", dataDomain: "customer", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
-  { name: "query_customer_orders", description: "查询客户订单", dataDomain: "orders", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "check_material_kitting", description: "查询齐套/欠料", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_customer_contacts", description: "查询客户联系人", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_customer_followups", description: "查询客户跟进", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_customer_opportunities", description: "查询客户商机", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_customer_orders", description: "查询客户订单", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
   { name: "query_order_financials", description: "查询订单成本/利润", dataDomain: "cost", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
   { name: "query_order_status", description: "查询订单及本地生产进度（不含成本利润）", packageId: "reference-manufacturing", version: "1.0.0", execution: "desktop", risk: "read", requiresConfirmation: false },
   { name: "report_production_progress", description: "更新订单的本地生产进度", packageId: "reference-manufacturing", version: "1.0.0", execution: "desktop", risk: "low_write", requiresConfirmation: true },

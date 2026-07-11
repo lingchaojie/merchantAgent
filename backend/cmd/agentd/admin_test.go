@@ -65,6 +65,14 @@ func TestAdminToolsDeduplicatesAndExposesExecutionMetadata(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("tools count = %d, want 3 (duplicate query_order_status removed): %+v", len(got), got)
 	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw tools: %v", err)
+	}
+	confirmation, exists := raw[0]["requiresConfirmation"]
+	if !exists || string(confirmation) != "false" {
+		t.Fatalf("query_order_status requiresConfirmation JSON = %s, exists=%v; want explicit false", confirmation, exists)
+	}
 	wantNames := []string{"query_order_status", "report_production_progress", "z_legacy_report"}
 	for i, want := range wantNames {
 		if got[i].Name != want {

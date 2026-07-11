@@ -510,7 +510,7 @@
 .skill-editor { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-top: 10px; }
 .skill-editor fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 8px 0; padding: 8px 10px; }
 .skill-editor legend { font-size: 11.5px; color: var(--text-tertiary); padding: 0 4px; }
-.chk { display: inline-flex; align-items: center; gap: 5px; margin: 3px 10px 3px 0; font-size: 12.5px; }
+.pane .chk { display: inline-flex; align-items: center; gap: 5px; margin: 3px 10px 3px 0; font-size: 12.5px; }
 .chk .warn { color: var(--amber); }
 .tool-choice { align-items: flex-start; vertical-align: top; }
 .tool-choice > input { margin-top: 2px; }

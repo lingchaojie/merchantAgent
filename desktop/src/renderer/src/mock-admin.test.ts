@@ -16,8 +16,10 @@ describe("browser admin mock", () => {
     const admin = createMockAdmin();
 
     const listed = await admin({ method: "GET", path: "/admin/tools", userId: adminUser });
+    if (!listed.ok) throw new Error(listed.error);
+    const tools = listed.data as ToolInfo[];
 
-    expect(listed.ok && (listed.data as ToolInfo[])).toEqual(expect.arrayContaining([
+    expect(tools).toEqual(expect.arrayContaining([
       expect.objectContaining({
         name: "report_production_progress",
         packageId: "reference-manufacturing",
@@ -27,6 +29,12 @@ describe("browser admin mock", () => {
         requiresConfirmation: true,
       }),
     ]));
+    const domainTools = tools
+      .filter((tool) => tool.dataDomain !== undefined)
+      .map(({ name, dataDomain }) => ({ name, dataDomain }));
+    expect(domainTools).toEqual([
+      { name: "query_order_financials", dataDomain: "cost" },
+    ]);
   });
 
   it("persists role updates and deletes their references", async () => {
