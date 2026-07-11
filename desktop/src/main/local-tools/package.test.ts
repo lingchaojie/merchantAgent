@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -37,6 +38,30 @@ function replaceSignedPayload(mutator: (manifest: Record<string, unknown>) => vo
     mutator(manifest);
     capability.payload = Buffer.from(JSON.stringify(manifest), "utf8").toString("base64");
   });
+}
+
+function writeSignedManifest(manifest: unknown): { packagePath: string; publicKeyPath: string } {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "signed-capability-test-"));
+  temporaryDirectories.push(directory);
+  const signedPackagePath = path.join(directory, "capability.json");
+  const signedPublicKeyPath = path.join(directory, "public.pem");
+  const payload = Buffer.from(JSON.stringify(manifest), "utf8");
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  fs.writeFileSync(
+    signedPackagePath,
+    JSON.stringify({
+      payload: payload.toString("base64"),
+      signature: sign(null, payload, privateKey).toString("base64"),
+      manifestDigest: `sha256:${createHash("sha256").update(payload).digest("hex")}`,
+    }),
+    "utf8",
+  );
+  fs.writeFileSync(
+    signedPublicKeyPath,
+    publicKey.export({ type: "spki", format: "pem" }),
+    "utf8",
+  );
+  return { packagePath: signedPackagePath, publicKeyPath: signedPublicKeyPath };
 }
 
 function backendManifestDigest(): string {
@@ -136,5 +161,43 @@ describe("verifyCapabilityPackage", () => {
         "execute_sql",
       ),
     ).toThrow(/tool_not_installed/);
+  });
+
+  it.each([
+    [
+      "duplicate tool names",
+      (manifest: ReturnType<typeof loadReferencePackage>["manifest"]) => {
+        manifest.tools.push(structuredClone(manifest.tools[0]));
+      },
+    ],
+    [
+      "high-write tools",
+      (manifest: ReturnType<typeof loadReferencePackage>["manifest"]) => {
+        (manifest.tools[0] as unknown as { risk: string }).risk = "high_write";
+      },
+    ],
+    [
+      "malformed parameter schemas",
+      (manifest: ReturnType<typeof loadReferencePackage>["manifest"]) => {
+        manifest.tools[0].parameters.required = ["undeclared"];
+      },
+    ],
+    [
+      "prototype-sensitive parameter names",
+      (manifest: ReturnType<typeof loadReferencePackage>["manifest"]) => {
+        manifest.tools[0].parameters.properties = JSON.parse(
+          '{"__proto__":{"type":"string"}}',
+        ) as typeof manifest.tools[0]["parameters"]["properties"];
+        manifest.tools[0].parameters.required = ["__proto__"];
+      },
+    ],
+  ] as const)("rejects validly signed %s", (_name, mutate) => {
+    const manifest = structuredClone(loadReferencePackage().manifest);
+    mutate(manifest);
+    const signed = writeSignedManifest(manifest);
+
+    expect(() => verifyCapabilityPackage(signed.packagePath, signed.publicKeyPath)).toThrow(
+      /package_integrity/,
+    );
   });
 });

@@ -4,6 +4,7 @@ import fs from "node:fs";
 const REFERENCE_PACKAGE_ID = "reference-manufacturing";
 const REFERENCE_PACKAGE_VERSION = "1.0.0";
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const PROTOTYPE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 export type LocalToolErrorCode =
   | "package_integrity"
@@ -123,8 +124,11 @@ function parseParameterSchema(value: unknown, toolName: string): ParameterSchema
   ) {
     return integrity(`${toolName} parameter schema is not closed`);
   }
-  const properties: Record<string, { type: JsonType }> = {};
+  const properties = Object.create(null) as Record<string, { type: JsonType }>;
   for (const [name, rawProperty] of Object.entries(schema.properties)) {
+    if (PROTOTYPE_KEYS.has(name)) {
+      return integrity(`${toolName}.${name} is not a permitted parameter name`);
+    }
     if (
       typeof rawProperty !== "object" ||
       rawProperty === null ||
@@ -136,7 +140,7 @@ function parseParameterSchema(value: unknown, toolName: string): ParameterSchema
     properties[name] = { type: (rawProperty as { type: JsonType }).type };
   }
   const required = requireStringArray(schema.required, `${toolName}.required`);
-  if (required.some((name) => !(name in properties))) {
+  if (required.some((name) => PROTOTYPE_KEYS.has(name) || !Object.hasOwn(properties, name))) {
     return integrity(`${toolName} requires an undeclared parameter`);
   }
   return { type: "object", properties, required, additionalProperties: false };
@@ -192,12 +196,12 @@ function validateArguments(schema: ParameterSchema, args: Record<string, unknown
     throw new LocalToolError("invalid_argument", "args must be an object");
   }
   for (const name of Object.keys(args)) {
-    if (!(name in schema.properties)) {
+    if (PROTOTYPE_KEYS.has(name) || !Object.hasOwn(schema.properties, name)) {
       throw new LocalToolError("invalid_argument", `unknown argument ${name}`);
     }
   }
   for (const [name, property] of Object.entries(schema.properties)) {
-    const value = args[name];
+    const value = Object.hasOwn(args, name) ? args[name] : undefined;
     if (value === undefined || value === null || (property.type === "string" && value === "")) {
       if (schema.required.includes(name)) {
         throw new LocalToolError("invalid_argument", `missing required argument ${name}`);

@@ -127,6 +127,37 @@ describe("LocalToolExecutor", () => {
     });
   });
 
+  it("writes the approved snapshot when confirmation mutates the original request", async () => {
+    const input = progressRequest();
+
+    const response = await executor.execute(input, async (preview) => {
+      expect(preview.proposed).toEqual({ completionRate: 80, note: "waiting for QA" });
+      input.idempotencyKey = "mutated-idempotency-key";
+      input.userId = "mutated-user";
+      input.args.orderId = "SO-OTHER";
+      input.args.workOrderId = "WO-OTHER";
+      input.args.completionRate = 99;
+      input.args.expectedVersion = 999;
+      input.args.note = "not approved";
+      return true;
+    });
+
+    expect(response).toMatchObject({
+      data: { orderId: "SO-1001", workOrderId: "WO-1001", completionRate: 80, version: 2 },
+      meta: {
+        status: "succeeded",
+        idempotencyKey: "idem-1",
+        before: { completionRate: 60, version: 1 },
+        after: { completionRate: 80, note: "waiting for QA", version: 2 },
+      },
+    });
+    expect(store.queryOrderStatus("SO-1001")).toMatchObject({
+      completionRate: 80,
+      note: "waiting for QA",
+      version: 2,
+    });
+  });
+
   it("returns the stored result for a duplicate idempotency key", async () => {
     const first = await executor.execute(progressRequest(), async () => true);
     const second = await executor.execute(progressRequest(), async () => true);
@@ -151,6 +182,20 @@ describe("LocalToolExecutor", () => {
     const response = await executor.execute(input, vi.fn());
 
     expect(response).toMatchObject({ error, meta: { status: "failed", confirmed: false } });
+  });
+
+  it("rejects invocation argument names inherited by ordinary objects", async () => {
+    const args = JSON.parse('{"orderId":"SO-1001","constructor":"attacker"}') as Record<
+      string,
+      unknown
+    >;
+
+    const response = await executor.execute(request({ args }), vi.fn());
+
+    expect(response).toMatchObject({
+      error: "invalid_argument",
+      meta: { status: "failed", confirmed: false },
+    });
   });
 
   it("maps a missing datasource without attempting dispatch", async () => {

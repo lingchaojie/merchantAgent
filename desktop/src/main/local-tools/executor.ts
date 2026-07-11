@@ -116,7 +116,7 @@ export class LocalToolExecutor {
 
   async execute(req: LocalToolRequest, confirm: Confirm): Promise<LocalToolResponse> {
     const executionId = crypto.randomUUID();
-    const base = {
+    let base = {
       executionId,
       idempotencyKey: typeof req.idempotencyKey === "string" ? req.idempotencyKey : "",
       confirmed: false,
@@ -141,19 +141,32 @@ export class LocalToolExecutor {
           return { data, meta: { ...base, status: "succeeded" } };
         }
         case "report_production_progress": {
-          const orderId = String(req.args.orderId);
-          const workOrderId = String(req.args.workOrderId);
-          const before = this.store.queryOrderStatus(orderId);
-          if (before.workOrderId !== workOrderId) {
+          const approvedRequest = Object.freeze({
+            tenantId: req.tenantId,
+            userId: req.userId,
+            deviceId: req.deviceId,
+            roleIds: Object.freeze([...req.roleIds]),
+            skillId: req.skillId,
+            callId: req.callId,
+            idempotencyKey: req.idempotencyKey,
+            orderId: String(req.args.orderId),
+            workOrderId: String(req.args.workOrderId),
+            completionRate: Number(req.args.completionRate),
+            expectedVersion: Number(req.args.expectedVersion),
+            note: String(req.args.note ?? ""),
+          });
+          base = { ...base, idempotencyKey: approvedRequest.idempotencyKey };
+          const before = this.store.queryOrderStatus(approvedRequest.orderId);
+          if (before.workOrderId !== approvedRequest.workOrderId) {
             throw new LocalToolError("source_conflict", "work order does not belong to the order");
           }
           const approved = await confirm({
-            orderId,
-            workOrderId,
+            orderId: approvedRequest.orderId,
+            workOrderId: approvedRequest.workOrderId,
             before,
             proposed: {
-              completionRate: Number(req.args.completionRate),
-              note: String(req.args.note ?? ""),
+              completionRate: approvedRequest.completionRate,
+              note: approvedRequest.note,
             },
           });
           if (!approved) {
@@ -164,12 +177,12 @@ export class LocalToolExecutor {
           }
           const confirmedAt = new Date().toISOString();
           const written = this.store.reportProductionProgress({
-            orderId,
-            workOrderId,
-            completionRate: Number(req.args.completionRate),
-            expectedVersion: Number(req.args.expectedVersion),
-            note: String(req.args.note ?? ""),
-            idempotencyKey: req.idempotencyKey,
+            orderId: approvedRequest.orderId,
+            workOrderId: approvedRequest.workOrderId,
+            completionRate: approvedRequest.completionRate,
+            expectedVersion: approvedRequest.expectedVersion,
+            note: approvedRequest.note,
+            idempotencyKey: approvedRequest.idempotencyKey,
           });
           return {
             data: written.data,
