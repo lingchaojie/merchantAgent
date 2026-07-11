@@ -13,9 +13,10 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "vitest run",
     "capability:generate": "node scripts/generate-reference-capability.mjs",
-    "dist:dir": "electron-vite build && electron-builder --dir",
-    "dist:win": "electron-vite build && electron-builder --win",
-    "dist": "electron-vite build && electron-builder"
+    "rebuild:electron": "electron-rebuild -f -w better-sqlite3",
+    "dist:dir": "electron-vite build && npm run rebuild:electron && electron-builder --dir",
+    "dist:win": "electron-vite build && npm run rebuild:electron && electron-builder --win",
+    "dist": "electron-vite build && npm run rebuild:electron && electron-builder"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
@@ -49,7 +50,7 @@
         "to": "capabilities/reference-public.pem"
       }
     ],
-    "npmRebuild": true,
+    "npmRebuild": false,
     "asarUnpack": ["node_modules/better-sqlite3/**/*"],
     "win": { "target": ["nsis"] },
     "mac": { "target": ["dmg"] },

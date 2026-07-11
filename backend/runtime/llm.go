@@ -341,10 +341,16 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 	// A connector tool. Must be unlocked by a loaded skill first.
 	tool, found := a.tools[name]
 	skillID, unlocked := unlockedBy[name]
-	if !found || !unlocked || skillID == "" {
+	if !found {
 		return fmt.Sprintf("工具 %q 尚未通过技能解锁或不存在。", name)
 	}
 	spec := tool.Spec()
+	if !unlocked || skillID == "" {
+		decision := Decision{Allowed: false, Reason: "tool not unlocked by an authorized skill"}
+		_ = a.record(p, spec, args, decision, "", tc.ID, turn, "denied", connector.ExecutionMeta{})
+		sink.emit(Event{Kind: "denied", Tool: name})
+		return fmt.Sprintf("tool %q is not unlocked by an authorized skill", name)
+	}
 	if err := connector.ValidateArgs(spec, args); err != nil {
 		_ = a.record(p, spec, args, Decision{Allowed: false, Reason: "invalid tool arguments"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
 		a.emitToolState(sink, spec, name, "failed")

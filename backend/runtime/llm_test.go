@@ -734,6 +734,33 @@ func TestLLM_GuardDeniesWithinLoadedSkill(t *testing.T) {
 	}
 }
 
+func TestLLM_AuditsInstalledToolBlockedBySkillGate(t *testing.T) {
+	steps := []provider.Message{
+		provider.Call("c1", "query_order_status", map[string]any{"orderId": "SO-1001"}),
+		provider.Text("The requested capability is not available."),
+	}
+	ag, audit, _ := newLLM(t, steps, fakeChecker{allow: map[string]bool{
+		"user:u1|invoker|tool:t/query_order_status":      true,
+		"user:u1|viewer|business_record:t/order/SO-1001": true,
+	}})
+	var denied bool
+	if _, _, err := ag.Ask(context.Background(), org.Principal{TenantID: "t", UserID: "u1"}, nil, "update order", func(event Event) {
+		if event.Kind == "denied" && event.Tool == "query_order_status" {
+			denied = true
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !denied {
+		t.Fatal("installed tool blocked by the skill gate did not emit denied")
+	}
+	entries := audit.Entries()
+	if len(entries) != 1 || entries[0].ToolCallID != "c1" || entries[0].Decision != "deny" || entries[0].Status != "denied" {
+		t.Fatalf("audit = %+v, want one denied skill-gate entry", entries)
+	}
+}
+
 func hasTool(defs []provider.ToolDef, name string) bool {
 	for _, d := range defs {
 		if d.Function.Name == name {

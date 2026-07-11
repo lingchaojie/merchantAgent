@@ -8,7 +8,7 @@ import (
 	"github.com/merchantagent/backend/org"
 )
 
-func TestE2E_SameQuestionDifferentPermissions(t *testing.T) {
+func TestE2E_SameQuestionDifferentRights(t *testing.T) {
 	agent, audit := newAgent(t)
 	ctx := context.Background()
 	p := func(u string) org.Principal { return org.Principal{TenantID: tenant, UserID: u} }
