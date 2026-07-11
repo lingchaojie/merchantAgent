@@ -31,6 +31,7 @@ export function App(): JSX.Element {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [view, setView] = useState<"chat" | "admin">("chat");
   const adminClient = useMemo(() => makeAdminClient((req) => agent.admin(req), userId), [userId]);
+  const [canAdmin, setCanAdmin] = useState<boolean | null>(null);
 
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
 
@@ -45,6 +46,19 @@ export function App(): JSX.Element {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    setCanAdmin(null);
+    adminClient.listRoles()
+      .then(() => { if (active) setCanAdmin(true); })
+      .catch(() => { if (active) setCanAdmin(false); });
+    return () => { active = false; };
+  }, [adminClient]);
+
+  useEffect(() => {
+    if (view === "admin" && canAdmin === false) setView("chat");
+  }, [canAdmin, view]);
 
   const patch = useCallback(
     (id: string, fn: (t: Thread) => Thread) =>
@@ -114,6 +128,7 @@ export function App(): JSX.Element {
           userId={userId}
           onCommand={() => setPaletteOpen(true)}
           view={view}
+          canAdmin={canAdmin}
           onToggleView={() => setView((v) => (v === "chat" ? "admin" : "chat"))}
         />
         {view === "chat" ? (

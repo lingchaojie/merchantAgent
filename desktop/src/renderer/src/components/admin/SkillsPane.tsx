@@ -1,99 +1,195 @@
-import { useState, useEffect, useCallback } from "react";
-import type { AdminClient, Skill, ToolInfo, Role, Template } from "../../admin";
+import { useCallback, useEffect, useState } from "react";
+import type { AdminClient, Domain, Role, Skill, Template, ToolInfo } from "../../admin";
+import { newSkillDraft } from "../../admin-ui";
 
-export function SkillsPane({ client }: { client: AdminClient }): JSX.Element {
+interface SkillEditorProps {
+  skill: Skill;
+  isNew: boolean;
+  busy: boolean;
+  tools: ToolInfo[];
+  roles: Role[];
+  domains: Domain[];
+  onChange: (skill: Skill) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}
+
+function toggle(items: string[], value: string): string[] {
+  return items.includes(value) ? items.filter((item) => item !== value) : [...items, value];
+}
+
+export function SkillEditor({
+  skill,
+  isNew,
+  busy,
+  tools,
+  roles,
+  domains,
+  onChange,
+  onSave,
+  onCancel,
+}: SkillEditorProps): JSX.Element {
+  const update = <K extends keyof Skill>(key: K, value: Skill[K]) => onChange({ ...skill, [key]: value });
+
+  return (
+    <div className="skill-editor">
+      <div className="skill-fields">
+        <label>Skill ID
+          <input name="skill-id" value={skill.skillId} disabled={busy || !isNew}
+            onChange={(event) => update("skillId", event.target.value)} />
+        </label>
+        <label>名称
+          <input name="skill-name" value={skill.name} disabled={busy}
+            onChange={(event) => update("name", event.target.value)} />
+        </label>
+      </div>
+      <label>描述
+        <input name="skill-description" value={skill.description} disabled={busy}
+          onChange={(event) => update("description", event.target.value)} />
+      </label>
+      <label>剧本 (playbook)
+        <textarea name="skill-playbook" rows={7} value={skill.playbookMd} disabled={busy}
+          onChange={(event) => update("playbookMd", event.target.value)} />
+      </label>
+      <fieldset><legend>工具</legend>
+        {tools.map((tool) => (
+          <label key={tool.name} className="chk">
+            <input type="checkbox" checked={skill.allowedTools.includes(tool.name)} disabled={busy}
+              onChange={() => update("allowedTools", toggle(skill.allowedTools, tool.name))} />
+            {tool.name}{tool.dataDomain ? <span className="warn"> ⚠ {tool.dataDomain}</span> : null}
+          </label>
+        ))}
+      </fieldset>
+      <fieldset><legend>数据域（声明，非授权）</legend>
+        {domains.map((domain) => (
+          <label key={domain.domainId} className="chk">
+            <input type="checkbox" checked={skill.dataDomains.includes(domain.domainId)} disabled={busy}
+              onChange={() => update("dataDomains", toggle(skill.dataDomains, domain.domainId))} />
+            {domain.label} <code>{domain.domainId}</code>
+          </label>
+        ))}
+      </fieldset>
+      <fieldset><legend>可用角色（闸 A：能力）</legend>
+        {roles.map((role) => (
+          <label key={role.roleId} className="chk">
+            <input type="checkbox" checked={skill.roles.includes(role.roleId)} disabled={busy}
+              onChange={() => update("roles", toggle(skill.roles, role.roleId))} />
+            {role.label}
+          </label>
+        ))}
+      </fieldset>
+      <div className="pane-form">
+        <button className="btn-primary" disabled={busy || !skill.skillId.trim() || !skill.name.trim()}
+          onClick={onSave}>保存</button>
+        <button className="btn" disabled={busy} onClick={onCancel}>取消</button>
+      </div>
+    </div>
+  );
+}
+
+export function SkillsPane({ client, tenantId }: { client: AdminClient; tenantId: string }): JSX.Element {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [domains, setDomains] = useState<Domain[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [tplId, setTplId] = useState("");
+  const [templateId, setTemplateId] = useState("");
   const [edit, setEdit] = useState<Skill | null>(null);
+  const [isNew, setIsNew] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [ok, setOk] = useState("");
 
-  const load = useCallback(() => {
-    client.listSkills().then(setSkills).catch((e) => setErr(String(e)));
-    client.listTools().then(setTools).catch(() => {});
-    client.listRoles().then(setRoles).catch(() => {});
-    client.listTemplates().then(setTemplates).catch(() => {});
+  const load = useCallback(async () => {
+    try {
+      const [nextSkills, nextTools, nextRoles, nextTemplates, domainData] = await Promise.all([
+        client.listSkills(), client.listTools(), client.listRoles(), client.listTemplates(), client.listDomains(),
+      ]);
+      setSkills(nextSkills); setTools(nextTools); setRoles(nextRoles);
+      setTemplates(nextTemplates); setDomains(domainData.domains);
+    } catch (error) {
+      setErr(String(error));
+    }
   }, [client]);
-  useEffect(load, [load]);
+
+  useEffect(() => { void load(); }, [load]);
 
   const save = async () => {
     if (!edit) return;
-    setErr("");
+    setBusy(true); setErr(""); setOk("");
     try {
-      await client.updateSkill(edit.skillId, edit);
-      setEdit(null); load();
-    } catch (e) { setErr(String(e)); }
+      if (isNew) await client.createBlankSkill({ ...edit, skillId: edit.skillId.trim(), name: edit.name.trim() });
+      else await client.updateSkill(edit.skillId, { ...edit, name: edit.name.trim() });
+      setEdit(null); setIsNew(false); await load(); setOk("已生效");
+    } catch (error) {
+      setErr(String(error));
+    } finally {
+      setBusy(false);
+    }
   };
+
   const clone = async () => {
-    if (!tplId) return;
-    setErr("");
+    if (!templateId) return;
+    setBusy(true); setErr(""); setOk("");
     try {
-      await client.cloneTemplate(tplId);
-      setTplId(""); load();
-    } catch (e) { setErr(String(e)); }
+      await client.cloneTemplate(templateId);
+      setTemplateId(""); await load(); setOk("已生效");
+    } catch (error) {
+      setErr(String(error));
+    } finally {
+      setBusy(false);
+    }
   };
-  const toggle = (arr: string[], v: string): string[] =>
-    arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
+
+  const remove = async (skillId: string) => {
+    setBusy(true); setErr(""); setOk("");
+    try {
+      await client.deleteSkill(skillId);
+      if (edit?.skillId === skillId) setEdit(null);
+      await load(); setOk("已生效");
+    } catch (error) {
+      setErr(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="pane">
       <h3 className="pane-title">技能</h3>
       {err && <div className="pane-err">{err}</div>}
-      <div className="pane-form">
-        <select value={tplId} onChange={(e) => setTplId(e.target.value)}>
+      {ok && <div className="pane-ok">{ok}</div>}
+      <div className="pane-form skill-create-actions">
+        <button className="btn" disabled={busy || edit !== null}
+          onClick={() => { setEdit(newSkillDraft(tenantId)); setIsNew(true); }}>新建空白技能</button>
+        <select value={templateId} disabled={busy} onChange={(event) => setTemplateId(event.target.value)}>
           <option value="">从模板新建…</option>
-          {templates.map((t) => (
-            <option key={t.templateId} value={t.templateId}>{t.name} ({t.templateId})</option>
+          {templates.map((template) => (
+            <option key={template.templateId} value={template.templateId}>{template.name} ({template.templateId})</option>
           ))}
         </select>
-        <button className="btn-primary" onClick={clone} disabled={!tplId || templates.length === 0}>克隆</button>
+        <button className="btn-primary" onClick={() => void clone()}
+          disabled={busy || !templateId || templates.length === 0}>克隆</button>
       </div>
-      <ul className="pane-list">
-        {skills.map((s) => (
-          <li key={s.skillId} className="pane-row">
-            <span><b>{s.name}</b> <code>{s.skillId}</code></span>
-            <button className="btn" onClick={() => setEdit({ ...s })}>编辑</button>
+      <ul className="pane-list skill-list">
+        {skills.map((skill) => (
+          <li key={skill.skillId} className="pane-row">
+            <span className="role-summary">
+              <span><b>{skill.name}</b> <code>{skill.skillId}</code></span>
+              {skill.description && <small>{skill.description}</small>}
+            </span>
+            <span className="pane-actions">
+              <button className="btn" disabled={busy}
+                onClick={() => { setEdit({ ...skill }); setIsNew(false); }}>编辑</button>
+              <button className="btn-danger" disabled={busy} onClick={() => void remove(skill.skillId)}>删除</button>
+            </span>
           </li>
         ))}
       </ul>
       {edit && (
-        <div className="skill-editor">
-          <label>名称<input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></label>
-          <label>剧本(playbook)
-            <textarea rows={5} value={edit.playbookMd} onChange={(e) => setEdit({ ...edit, playbookMd: e.target.value })} />
-          </label>
-          <fieldset><legend>工具</legend>
-            {tools.map((t) => (
-              <label key={t.name} className="chk">
-                <input type="checkbox" checked={edit.allowedTools.includes(t.name)}
-                  onChange={() => setEdit({ ...edit, allowedTools: toggle(edit.allowedTools, t.name) })} />
-                {t.name}{t.dataDomain ? <span className="warn"> ⚠ {t.dataDomain}</span> : null}
-              </label>
-            ))}
-          </fieldset>
-          <fieldset><legend>data domains (声明，非授权)</legend>
-            {["cost", "pricing"].map((d) => (
-              <label key={d} className="chk">
-                <input type="checkbox" checked={edit.dataDomains.includes(d)}
-                  onChange={() => setEdit({ ...edit, dataDomains: toggle(edit.dataDomains, d) })} />{d}
-              </label>
-            ))}
-          </fieldset>
-          <fieldset><legend>可用角色 (闸 A：能力)</legend>
-            {roles.map((r) => (
-              <label key={r.roleId} className="chk">
-                <input type="checkbox" checked={edit.roles.includes(r.roleId)}
-                  onChange={() => setEdit({ ...edit, roles: toggle(edit.roles, r.roleId) })} />{r.label}
-              </label>
-            ))}
-          </fieldset>
-          <div className="pane-form">
-            <button className="btn-primary" onClick={save}>保存</button>
-            <button className="btn" onClick={() => setEdit(null)}>取消</button>
-          </div>
-        </div>
+        <SkillEditor skill={edit} isNew={isNew} busy={busy} tools={tools} roles={roles} domains={domains}
+          onChange={setEdit} onSave={() => void save()}
+          onCancel={() => { setEdit(null); setIsNew(false); }} />
       )}
     </div>
   );

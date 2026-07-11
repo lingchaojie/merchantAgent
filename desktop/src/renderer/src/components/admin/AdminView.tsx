@@ -37,7 +37,7 @@ export function AdminView({ client, tenantId }: { client: AdminClient; tenantId:
       <div className="admin-body">
         {tab === "roles" && <RolesPane client={client} />}
         {tab === "rules" && <RulesPane client={client} />}
-        {tab === "skills" && <SkillsPane client={client} />}
+        {tab === "skills" && <SkillsPane client={client} tenantId={tenantId} />}
         {tab === "assign" && <AssignPane client={client} tenantId={tenantId} />}
         {tab === "domains" && <DomainsPane client={client} tenantId={tenantId} />}
       </div>
