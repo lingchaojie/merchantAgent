@@ -180,9 +180,9 @@ export const client = {
   adminRequest,
 };
 
-// spawnAgentd optionally launches the Go binary; returns the child (or null if
-// AGENTD_BIN unset → assume an external agentd is already running).
-export function spawnAgentd(): ChildProcess | null {
+// spawnAgentd optionally launches the Go binary and waits until the OS confirms
+// the process spawned. AGENTD_BIN unset means an external agentd is in use.
+export async function spawnAgentd(): Promise<ChildProcess | null> {
   const bin = process.env.AGENTD_BIN;
   if (!bin) return null;
   const child = spawn(bin, [], {
@@ -191,5 +191,22 @@ export function spawnAgentd(): ChildProcess | null {
   });
   child.stdout?.on("data", (d) => process.stdout.write(`[agentd] ${d}`));
   child.stderr?.on("data", (d) => process.stderr.write(`[agentd] ${d}`));
-  return child;
+  child.on("error", (error) => console.error("[agentd] process error", error));
+  return new Promise<ChildProcess>((resolve, reject) => {
+    const onSpawn = (): void => {
+      child.off("error", onStartupError);
+      resolve(child);
+    };
+    const onStartupError = (error: Error): void => {
+      child.off("spawn", onSpawn);
+      try {
+        child.kill();
+      } catch {
+        // Preserve the spawn error after best-effort child cleanup.
+      }
+      reject(error);
+    };
+    child.once("spawn", onSpawn);
+    child.once("error", onStartupError);
+  });
 }

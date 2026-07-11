@@ -15,7 +15,7 @@ export interface DesktopStartupDependencies<
   verifyPackage(): TPackage;
   createExecutor(pkg: TPackage, store: TStore): TExecutor;
   register(executor: TExecutor): () => void;
-  spawnAgentd(): KillableChild | null;
+  spawnAgentd(): KillableChild | null | Promise<KillableChild | null>;
   createWindow(): void | Promise<void>;
 }
 
@@ -61,7 +61,7 @@ export async function initializeDesktop<
     const pkg = dependencies.verifyPackage();
     const executor = dependencies.createExecutor(pkg, store);
     unregister = dependencies.register(executor);
-    child = dependencies.spawnAgentd();
+    child = await dependencies.spawnAgentd();
     await dependencies.createWindow();
     return runtime;
   } catch (error) {
