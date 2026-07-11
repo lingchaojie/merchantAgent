@@ -54,6 +54,9 @@ func TestReferenceToolSpecs(t *testing.T) {
 	if progressSpec.ResourceType != "business_record" || progressSpec.ResourceKind != "order" || progressSpec.ResourceArg != "orderId" {
 		t.Fatalf("progress authorization metadata=%+v", progressSpec)
 	}
+	if progressSpec.ResourceRelation != "operator" {
+		t.Fatalf("progress resource relation=%q want operator", progressSpec.ResourceRelation)
+	}
 	if len(progressSpec.Params) != 5 || progressSpec.Params[2].Type != connector.ParamInteger || progressSpec.Params[4].Required {
 		t.Fatalf("progress params=%+v", progressSpec.Params)
 	}

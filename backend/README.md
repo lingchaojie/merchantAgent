@@ -70,7 +70,7 @@ make test-unit
 make accept          # = docker compose up -d + 等待 + go test ./authz -run Acceptance -v
 
 # 或手动：
-docker compose up -d           # OpenFGA 在 host :8090（避开常见 8080 冲突）
+docker compose up -d           # OpenFGA 在 host :18080（避开常见 8080 冲突）
 go test ./...                  # 验收用例连不上 OpenFGA 会自动 skip，不会误失败
 ```
 
@@ -94,6 +94,8 @@ OPENFGA_API_URL=http://localhost:18080 go test ./cmd/agentd ./e2e \
 
 `provider.Fake` 只替代外部 LLM，HTTP/SSE、真实 OpenFGA、runtime guard、client-exec 请求契约和审计链均走生产代码。sales 强制尝试写时，必须无 `local_tool_request` 且留下 `decision=deny,status=denied`；已知但未由授权 Skill 解锁的工具也会被审计，而任意未知工具名不会被执行。
 
+Gate A（Skill 暴露）与 Gate B（记录关系）独立生效。2026-07-12 真机探针临时把 `production-progress` 暴露给 sales，绕过 Gate A 后，`u_sales1` 对 `SO-1001` 的写仍被 Gate B `business_record#operator` 拒绝；桌面未收到本地请求、未出现原生确认，参考库未变，审计记录 `decision=deny,status=denied,reason="no operator access to business_record order/SO-1001"`。探针结束后立即把 Skill 恢复为仅 `manager_tier`。
+
 这证明授权后的桌面本地执行拓扑，不是客户数据库集成。参考库位于 Windows `%APPDATA%\merchant-agent-desktop\reference-enterprise.db`，不在 backend；没有任意 SQL/CRUD、真实企微、真实客户凭据或高风险写。
 
 ## 两条"可插拔接缝"（Phase 0 用 mock，日后无痛替换）
@@ -103,7 +105,7 @@ OPENFGA_API_URL=http://localhost:18080 go test ./cmd/agentd ./e2e \
 
 ## Phase 0 边界（明确不做）
 
-真实企微 OAuth（无备案域名）、真实 ERP、写操作、多 IdP 实现、知识库 RAG（P1）、计费。
+真实企微 OAuth（无备案域名）、真实 ERP/客户系统写入、任意 SQL/CRUD、高风险写、多 IdP 实现、知识库 RAG（P1）、计费。参考 SQLite 的低风险生产进度写已实现，不代表客户连接器。
 
 ## 已知取舍
 

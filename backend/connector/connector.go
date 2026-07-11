@@ -40,8 +40,8 @@ type ParamSpec struct {
 
 // ToolSpec declares a tool AND its authorization footprint. The runtime guard
 // (runtime/guard.go) uses the authz fields to enforce research/11 §6.1:
-//   - ResourceType+ResourceArg → record-level data authz (can this user view the
-//     specific resource, e.g. business_record:<tenant>/<kind>/<id>).
+//   - ResourceType+ResourceArg → record-level data authz. ResourceRelation is
+//     the required relation and defaults to viewer for existing read tools.
 //   - DataDomain → sensitivity authz (can this user view e.g. the cost domain).
 //
 // Empty authz fields mean "not applicable" (e.g. a tool touching no sensitive
@@ -56,6 +56,7 @@ type ToolSpec struct {
 	ResourceType         string
 	ResourceKind         string
 	ResourceArg          string
+	ResourceRelation     string
 	DataDomain           string
 	Execution            ExecutionLocation
 	Risk                 RiskLevel

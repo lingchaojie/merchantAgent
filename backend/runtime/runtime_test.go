@@ -1,7 +1,8 @@
-﻿package runtime
+package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/merchantagent/backend/connector"
@@ -78,6 +79,36 @@ func TestGuard_ResourceKindScopesBusinessRecord(t *testing.T) {
 	}
 	if !d.Allowed {
 		t.Fatalf("authorization = %+v, want allowed", d)
+	}
+}
+
+func TestGuard_UsesDeclaredResourceRelation(t *testing.T) {
+	base := map[string]bool{
+		"user:u1|invoker|tool:t/report_production_progress": true,
+		"user:u1|viewer|business_record:t/order/SO-1001":    true,
+	}
+	spec := connector.ToolSpec{
+		Name: "report_production_progress", ResourceType: "business_record",
+		ResourceKind: "order", ResourceArg: "orderId", ResourceRelation: "operator",
+	}
+	p := org.Principal{TenantID: "t", UserID: "u1"}
+	args := map[string]any{"orderId": "SO-1001"}
+
+	denied, err := NewGuard(fakeChecker{allow: base}, "t").Authorize(context.Background(), p, spec, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied.Allowed || !strings.Contains(denied.Reason, "operator") {
+		t.Fatalf("viewer-only principal decision = %+v, want operator denial", denied)
+	}
+
+	base["user:u1|operator|business_record:t/order/SO-1001"] = true
+	allowed, err := NewGuard(fakeChecker{allow: base}, "t").Authorize(context.Background(), p, spec, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed.Allowed {
+		t.Fatalf("operator decision = %+v, want allowed", allowed)
 	}
 }
 

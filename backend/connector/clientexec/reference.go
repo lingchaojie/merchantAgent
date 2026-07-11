@@ -64,6 +64,7 @@ func (reference) Tools() []connector.Tool {
 			ResourceType:         "business_record",
 			ResourceKind:         "order",
 			ResourceArg:          "orderId",
+			ResourceRelation:     "operator",
 			Execution:            connector.ExecutionDesktop,
 			Risk:                 connector.RiskLowWrite,
 			RequiresConfirmation: true,
