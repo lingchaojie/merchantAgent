@@ -1,4 +1,4 @@
-package runtime
+﻿package runtime
 
 import (
 	"context"
@@ -42,16 +42,16 @@ func TestGuard_Intersection(t *testing.T) {
 	// user can use a skill exposing both tools (invoker true) and can view the
 	// order, but NOT the cost domain → status allowed, financials denied.
 	chk := fakeChecker{allow: map[string]bool{
-		"user:u1|invoker|tool:t/query_order_status":     true,
-		"user:u1|invoker|tool:t/query_order_financials": true,
-		"user:u1|viewer|order:t/SO-1001":                true,
+		"user:u1|invoker|tool:t/query_order_status":      true,
+		"user:u1|invoker|tool:t/query_order_financials":  true,
+		"user:u1|viewer|business_record:t/order/SO-1001": true,
 		// cost domain intentionally absent → false
 	}}
 	g := NewGuard(chk, "t")
 	p := org.Principal{TenantID: "t", UserID: "u1"}
 
-	status := connector.ToolSpec{Name: "query_order_status", ResourceType: "order", ResourceArg: "orderId"}
-	fin := connector.ToolSpec{Name: "query_order_financials", ResourceType: "order", ResourceArg: "orderId", DataDomain: "cost"}
+	status := connector.ToolSpec{Name: "query_order_status", ResourceType: "business_record", ResourceKind: "order", ResourceArg: "orderId"}
+	fin := connector.ToolSpec{Name: "query_order_financials", ResourceType: "business_record", ResourceKind: "order", ResourceArg: "orderId", DataDomain: "cost"}
 	args := map[string]any{"orderId": "SO-1001"}
 
 	if d, _ := g.Authorize(context.Background(), p, status, args); !d.Allowed {
@@ -62,16 +62,35 @@ func TestGuard_Intersection(t *testing.T) {
 	}
 }
 
+func TestGuard_ResourceKindScopesBusinessRecord(t *testing.T) {
+	chk := fakeChecker{allow: map[string]bool{
+		"user:u1|invoker|tool:t/query_order_status":      true,
+		"user:u1|viewer|business_record:t/order/SO-1001": true,
+	}}
+	g := NewGuard(chk, "t")
+	spec := connector.ToolSpec{
+		Name: "query_order_status", ResourceType: "business_record",
+		ResourceKind: "order", ResourceArg: "orderId",
+	}
+	d, err := g.Authorize(context.Background(), org.Principal{TenantID: "t", UserID: "u1"}, spec, map[string]any{"orderId": "SO-1001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Allowed {
+		t.Fatalf("authorization = %+v, want allowed", d)
+	}
+}
+
 // TestGuard_CapabilityWall: no skill grants the tool → denied up front, even if
 // the user could view the record/domain (design §3.4).
 func TestGuard_CapabilityWall(t *testing.T) {
 	chk := fakeChecker{allow: map[string]bool{
-		"user:u1|viewer|order:t/SO-1001": true, // could see record…
+		"user:u1|viewer|business_record:t/order/SO-1001": true, // could see record…
 		// …but no invoker tuple → capability wall denies first
 	}}
 	g := NewGuard(chk, "t")
 	p := org.Principal{TenantID: "t", UserID: "u1"}
-	status := connector.ToolSpec{Name: "query_order_status", ResourceType: "order", ResourceArg: "orderId"}
+	status := connector.ToolSpec{Name: "query_order_status", ResourceType: "business_record", ResourceKind: "order", ResourceArg: "orderId"}
 	d, _ := g.Authorize(context.Background(), p, status, map[string]any{"orderId": "SO-1001"})
 	if d.Allowed {
 		t.Error("must be denied: no skill grants the tool")

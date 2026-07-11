@@ -1,4 +1,4 @@
-// Package e2e is the composition root test: it wires the REAL OpenFGA store +
+﻿// Package e2e is the composition root test: it wires the REAL OpenFGA store +
 // org sync + mock ERP connector + agent runtime, and proves "same question,
 // different permissions" through the whole loop (router → guard → connector),
 // not via direct FGA asserts. Skips if OpenFGA isn't running.
@@ -50,8 +50,9 @@ func newAgent(t *testing.T) (*runtime.Agent, *runtime.AuditLog) {
 	}
 	// scenario fixtures: order ownership + cost-domain viewers.
 	fx := sync.Diff{Writes: []sync.Tuple{
-		{User: "user:u_sales1", Relation: "owner", Object: "order:" + obj("SO-1001")},
-		{User: "department:" + obj("d_sales"), Relation: "owner_dept", Object: "order:" + obj("SO-1001")},
+		{User: "user:u_sales1", Relation: "owner", Object: "business_record:" + obj("order/SO-1001")},
+		{User: "department:" + obj("d_sales"), Relation: "owner_dept", Object: "business_record:" + obj("order/SO-1001")},
+		{User: "department:" + obj("d_prod") + "#member", Relation: "operator", Object: "business_record:" + obj("order/SO-1001")},
 		{User: "user:u_fin", Relation: "viewer", Object: "data_domain:" + obj("cost")},
 		{User: "department:" + obj("d_sales") + "#manager", Relation: "viewer", Object: "data_domain:" + obj("cost")},
 		{User: "department:" + obj("d_root") + "#manager", Relation: "viewer", Object: "data_domain:" + obj("cost")},
@@ -59,9 +60,8 @@ func newAgent(t *testing.T) (*runtime.Agent, *runtime.AuditLog) {
 	if err := store.ApplyDiff(ctx, fx); err != nil {
 		t.Fatal(err)
 	}
-	// Capability: project the seeded skills into tuples so sales + manager roles
-	// can invoke the order tools. u_plan(planner) is in no skill → denied at the
-	// capability wall (design §3.4).
+	// Capability remains independent from record access and comes only from the
+	// administrator-assigned roles on seeded skills.
 	skStore, err := skill.Open()
 	if err != nil {
 		t.Fatal(err)

@@ -1,4 +1,4 @@
-package mockerp
+﻿package mockerp
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func TestTools_SpecsAndAuthzFootprint(t *testing.T) {
 		if s.DataDomain != dd {
 			t.Errorf("%s DataDomain = %q, want %q", s.Name, s.DataDomain, dd)
 		}
-		if s.ResourceType != "order" || s.ResourceArg != "orderId" {
+		if s.ResourceType != "business_record" || s.ResourceKind != "order" || s.ResourceArg != "orderId" {
 			t.Errorf("%s resource footprint wrong: %+v", s.Name, s)
 		}
 	}

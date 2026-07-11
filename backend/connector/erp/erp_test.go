@@ -35,6 +35,9 @@ func TestTools_AuthzFootprint(t *testing.T) {
 		if s.DataDomain != dd {
 			t.Errorf("%s DataDomain = %q, want %q", s.Name, s.DataDomain, dd)
 		}
+		if s.ResourceArg != "" && (s.ResourceType != "business_record" || s.ResourceKind != "order") {
+			t.Errorf("%s resource footprint wrong: %+v", s.Name, s)
+		}
 	}
 }
 

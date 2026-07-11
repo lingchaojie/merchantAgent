@@ -3,9 +3,85 @@ package skill
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func assertSkillRoles(t *testing.T, s *Store, id string, want []string) {
+	t.Helper()
+	skills, err := s.List(context.Background(), "mock-corp-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sk := range skills {
+		if sk.SkillID == id {
+			if !reflect.DeepEqual(sk.Roles, want) {
+				t.Fatalf("skill %s roles = %v, want %v", id, sk.Roles, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("skill %s missing", id)
+}
+
+func assertSkillMissing(t *testing.T, s *Store, id string) {
+	t.Helper()
+	skills, err := s.List(context.Background(), "mock-corp-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sk := range skills {
+		if sk.SkillID == id {
+			t.Fatalf("skill %s unexpectedly exists", id)
+		}
+	}
+}
+
+func TestOpenFileAppliesLocalToolMigrationOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "skills.db")
+	s, err := OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSkillRoles(t, s, "order-status", []string{"sales", "planner", "manager_tier"})
+	assertSkillRoles(t, s, "production-progress", []string{"planner", "manager_tier"})
+	skills, err := s.List(context.Background(), "mock-corp-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sk := range skills {
+		if sk.SkillID != "production-progress" {
+			continue
+		}
+		if !reflect.DeepEqual(sk.AllowedTools, []string{"query_order_status", "report_production_progress"}) {
+			t.Fatalf("production-progress tools = %v", sk.AllowedTools)
+		}
+		for _, marker := range []string{
+			"1. Call query_order_status",
+			"2. Pass the returned version",
+			"expectedVersion",
+			"3. Summarize the proposed",
+			"4. Call report_production_progress only after the client confirmation gate",
+		} {
+			if !strings.Contains(sk.PlaybookMD, marker) {
+				t.Fatalf("production-progress playbook missing %q: %s", marker, sk.PlaybookMD)
+			}
+		}
+	}
+	if err := s.Delete(context.Background(), "mock-corp-001", "production-progress"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	assertSkillMissing(t, s, "production-progress")
+}
 
 func TestList_Seeded(t *testing.T) {
 	s, err := Open()
@@ -17,8 +93,8 @@ func TestList_Seeded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(skills) != 2 {
-		t.Fatalf("skills = %d, want 2 (order360, customer360)", len(skills))
+	if len(skills) != 4 {
+		t.Fatalf("skills = %d, want 4", len(skills))
 	}
 	byID := map[string]Skill{}
 	for _, sk := range skills {
@@ -71,7 +147,7 @@ func TestSkillCRUD_AndClone(t *testing.T) {
 	defer s.Close()
 
 	tmpls, err := s.ListTemplates(ctx)
-	if err != nil || len(tmpls) != 1 || tmpls[0].TemplateID != "order-360" {
+	if err != nil || len(tmpls) != 3 || tmpls[0].TemplateID != "order-360" {
 		t.Fatalf("templates = %+v err=%v", tmpls, err)
 	}
 	// Clone the platform template into a new tenant skill.
@@ -80,8 +156,8 @@ func TestSkillCRUD_AndClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	skills, _ := s.List(ctx, "mock-corp-001")
-	if len(skills) != 3 {
-		t.Fatalf("skills = %d, want 3 after clone", len(skills))
+	if len(skills) != 5 {
+		t.Fatalf("skills = %d, want 5 after clone", len(skills))
 	}
 	// Update the clone's roles (Gate A) + playbook.
 	err = s.Update(ctx, Skill{
@@ -97,8 +173,8 @@ func TestSkillCRUD_AndClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	skills, _ = s.List(ctx, "mock-corp-001")
-	if len(skills) != 2 {
-		t.Fatalf("skills = %d, want 2 after delete", len(skills))
+	if len(skills) != 4 {
+		t.Fatalf("skills = %d, want 4 after delete", len(skills))
 	}
 }
 
@@ -164,12 +240,15 @@ func TestOpenFile_SeedGuardSurvivesEmptySkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Delete both seeded skills.
-	if err := s.Delete(ctx, "mock-corp-001", "order360"); err != nil {
+	// Delete every seeded and migrated skill.
+	skills, err := s.List(ctx, "mock-corp-001")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Delete(ctx, "mock-corp-001", "customer360"); err != nil {
-		t.Fatal(err)
+	for _, sk := range skills {
+		if err := s.Delete(ctx, "mock-corp-001", sk.SkillID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -181,7 +260,7 @@ func TestOpenFile_SeedGuardSurvivesEmptySkills(t *testing.T) {
 		t.Fatalf("re-open after emptying skills errored (re-seed crash?): %v", err)
 	}
 	defer s2.Close()
-	skills, err := s2.List(ctx, "mock-corp-001")
+	skills, err = s2.List(ctx, "mock-corp-001")
 	if err != nil {
 		t.Fatal(err)
 	}

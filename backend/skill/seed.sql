@@ -1,8 +1,8 @@
 -- Seed: one platform template + two tenant skills for mock-corp-001.
 -- roles use platform role ids (see sync.DefaultRoleRules): sales / manager_tier /
 -- planner / … . order360 is usable by sales + manager_tier so the e2e users
--- u_sales1(sales), u_smgr(manager_tier), u_boss(manager_tier) can invoke the
--- order tools, while u_plan(planner) is denied at the capability wall.
+-- u_sales1(sales), u_smgr(manager_tier), and u_boss(manager_tier) can invoke
+-- the original order360 tools. Later migrations add narrower role-scoped skills.
 
 INSERT INTO templates (template_id, name, description, playbook_md, allowed_tools, data_domains, suggested_roles) VALUES
  ('order-360', '订单360',

@@ -1,4 +1,4 @@
-package authz
+﻿package authz
 
 import (
 	"context"
@@ -67,10 +67,11 @@ func setup(t *testing.T) *Store {
 	// cost is high-sensitivity → only finance + dept managers (incl. boss via
 	// root-dept manager inheritance). Sales staff are intentionally excluded.
 	fixtures := sync.Diff{Writes: []sync.Tuple{
-		{User: "user:u_sales1", Relation: "owner", Object: "order:" + obj("SO-1001")},
-		{User: "department:" + obj("d_sales"), Relation: "owner_dept", Object: "order:" + obj("SO-1001")},
-		{User: "user:u_sales1", Relation: "owner", Object: "order:" + obj("SO-1002")},
-		{User: "department:" + obj("d_sales"), Relation: "owner_dept", Object: "order:" + obj("SO-1002")},
+		{User: "user:u_sales1", Relation: "owner", Object: "business_record:" + obj("order/SO-1001")},
+		{User: "department:" + obj("d_sales"), Relation: "owner_dept", Object: "business_record:" + obj("order/SO-1001")},
+		{User: "department:" + obj("d_prod") + "#member", Relation: "operator", Object: "business_record:" + obj("order/SO-1001")},
+		{User: "user:u_sales1", Relation: "owner", Object: "business_record:" + obj("order/SO-1002")},
+		{User: "department:" + obj("d_sales"), Relation: "owner_dept", Object: "business_record:" + obj("order/SO-1002")},
 		{User: "user:u_fin", Relation: "viewer", Object: "data_domain:" + obj("cost")},
 		{User: "department:" + obj("d_sales") + "#manager", Relation: "viewer", Object: "data_domain:" + obj("cost")},
 		{User: "department:" + obj("d_root") + "#manager", Relation: "viewer", Object: "data_domain:" + obj("cost")},

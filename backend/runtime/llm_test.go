@@ -6,10 +6,25 @@ import (
 	"testing"
 
 	"github.com/merchantagent/backend/connector"
+	"github.com/merchantagent/backend/connector/clientexec"
 	"github.com/merchantagent/backend/connector/localfile"
 	"github.com/merchantagent/backend/org"
 	"github.com/merchantagent/backend/provider"
 )
+
+func TestToolSpecReportsLastRegisteredConnector(t *testing.T) {
+	agent := NewLLMAgent(nil, []connector.Connector{
+		stubConn{tools: []connector.Tool{orderStatusTool()}},
+		clientexec.NewReference(),
+	}, nil, nil, nil, "t")
+	spec, ok := agent.ToolSpec("query_order_status")
+	if !ok {
+		t.Fatal("query_order_status missing")
+	}
+	if spec.Execution != connector.ExecutionDesktop {
+		t.Fatalf("query_order_status execution = %q, want desktop", spec.Execution)
+	}
+}
 
 func TestToolDefUsesDeclaredParamTypes(t *testing.T) {
 	def := toolDef(connector.ToolSpec{Params: []connector.ParamSpec{
@@ -182,7 +197,7 @@ func (f fakeResolver) UsableSkills(context.Context, org.Principal) ([]SkillInfo,
 func orderStatusTool() connector.Tool {
 	return stubTool{
 		spec: connector.ToolSpec{Name: "query_order_status", Description: "查进度",
-			Params: []connector.ParamSpec{{Name: "orderId", Required: true}}, ResourceType: "order", ResourceArg: "orderId"},
+			Params: []connector.ParamSpec{{Name: "orderId", Required: true}}, ResourceType: "business_record", ResourceKind: "order", ResourceArg: "orderId"},
 		out: map[string]any{"orderId": "SO-1001", "status": "生产中"},
 	}
 }
@@ -190,7 +205,7 @@ func orderStatusTool() connector.Tool {
 func orderFinTool() connector.Tool {
 	return stubTool{
 		spec: connector.ToolSpec{Name: "query_order_financials", Description: "查利润",
-			Params: []connector.ParamSpec{{Name: "orderId", Required: true}}, ResourceType: "order", ResourceArg: "orderId", DataDomain: "cost"},
+			Params: []connector.ParamSpec{{Name: "orderId", Required: true}}, ResourceType: "business_record", ResourceKind: "order", ResourceArg: "orderId", DataDomain: "cost"},
 		out: map[string]any{"orderId": "SO-1001", "profit": 18000},
 	}
 }
@@ -211,8 +226,8 @@ func newLLM(t *testing.T, steps []provider.Message, chk Checker) (*LLMAgent, *Au
 // Happy path: load skill → call status → final answer.
 func TestLLM_ProgressiveDisclosure_HappyPath(t *testing.T) {
 	chk := fakeChecker{allow: map[string]bool{
-		"user:u1|invoker|tool:t/query_order_status": true,
-		"user:u1|viewer|order:t/SO-1001":            true,
+		"user:u1|invoker|tool:t/query_order_status":      true,
+		"user:u1|viewer|business_record:t/order/SO-1001": true,
 	}}
 	steps := []provider.Message{
 		provider.Call("c1", "load_skill", map[string]any{"skillId": "order360"}),
@@ -244,8 +259,8 @@ func TestLLM_ProgressiveDisclosure_HappyPath(t *testing.T) {
 // Deny path: skill loaded, but guard denies financials (no cost domain).
 func TestLLM_GuardDeniesWithinLoadedSkill(t *testing.T) {
 	chk := fakeChecker{allow: map[string]bool{
-		"user:u1|invoker|tool:t/query_order_financials": true,
-		"user:u1|viewer|order:t/SO-1001":                true,
+		"user:u1|invoker|tool:t/query_order_financials":  true,
+		"user:u1|viewer|business_record:t/order/SO-1001": true,
 		// cost domain absent → deny
 	}}
 	steps := []provider.Message{

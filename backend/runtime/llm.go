@@ -339,6 +339,16 @@ func (a *LLMAgent) UsedToolNames() []string {
 	return names
 }
 
+// ToolSpec exposes the effective registered tool contract. When connectors
+// publish the same name, this is the spec from the last registered connector.
+func (a *LLMAgent) ToolSpec(name string) (connector.ToolSpec, bool) {
+	tool, ok := a.tools[name]
+	if !ok {
+		return connector.ToolSpec{}, false
+	}
+	return tool.Spec().WithDefaults(), true
+}
+
 // record appends an audit entry for a tool decision (nil-safe).
 func (a *LLMAgent) record(p org.Principal, tool string, args map[string]any, d Decision) {
 	if a.audit == nil {

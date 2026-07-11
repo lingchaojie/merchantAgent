@@ -1,4 +1,4 @@
-package mockerp
+﻿package mockerp
 
 import (
 	"context"
@@ -24,7 +24,8 @@ func (t *statusTool) Spec() connector.ToolSpec {
 		Name:         "query_order_status",
 		Description:  "查询订单进度/交期（不含成本利润）",
 		Params:       []connector.ParamSpec{{Name: "orderId", Description: "订单号", Required: true}},
-		ResourceType: "order",
+		ResourceType: "business_record",
+		ResourceKind: "order",
 		ResourceArg:  "orderId",
 	}
 }
@@ -48,7 +49,8 @@ func (t *financialsTool) Spec() connector.ToolSpec {
 		Name:         "query_order_financials",
 		Description:  "查询订单成本/售价/利润（高敏，成本数据域）",
 		Params:       []connector.ParamSpec{{Name: "orderId", Description: "订单号", Required: true}},
-		ResourceType: "order",
+		ResourceType: "business_record",
+		ResourceKind: "order",
 		ResourceArg:  "orderId",
 		DataDomain:   "cost",
 	}
@@ -73,7 +75,8 @@ func (t *kittingTool) Spec() connector.ToolSpec {
 		Name:         "check_material_kitting",
 		Description:  "检查订单齐套情况，列出欠料清单",
 		Params:       []connector.ParamSpec{{Name: "orderId", Description: "订单号", Required: true}},
-		ResourceType: "order",
+		ResourceType: "business_record",
+		ResourceKind: "order",
 		ResourceArg:  "orderId",
 	}
 }

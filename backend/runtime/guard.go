@@ -1,4 +1,4 @@
-package runtime
+﻿package runtime
 
 import (
 	"context"
@@ -62,6 +62,9 @@ func (g *Guard) Authorize(ctx context.Context, p org.Principal, spec connector.T
 		id, ok := args[spec.ResourceArg].(string)
 		if !ok || id == "" {
 			return Decision{false, "missing resource id arg " + spec.ResourceArg}, nil
+		}
+		if spec.ResourceKind != "" {
+			id = spec.ResourceKind + "/" + id
 		}
 		ok, err := g.chk.Check(ctx, user, "viewer", g.obj(spec.ResourceType, id))
 		if err != nil {
