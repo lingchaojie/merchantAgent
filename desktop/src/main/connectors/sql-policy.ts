@@ -461,14 +461,13 @@ export function readOperationUsesResourceParameter(
   const resourceColumn = resourceProjection === undefined
     ? undefined
     : validated.resultColumns.get(resourceProjection.sourceAlias);
+  const resourceLeaves = validated.predicate?.leaves.filter((leaf) => leaf.parameter === parameter) ?? [];
   return validated.predicate !== null
     && resourceColumn !== undefined
     && validated.predicate.andOnly
-    && validated.predicate.leaves.some((leaf) => (
-      leaf.parameter === parameter
-      && leaf.operator === "="
-      && leaf.column.toLowerCase() === resourceColumn.toLowerCase()
-    ));
+    && resourceLeaves.length === 1
+    && resourceLeaves[0]?.operator === "="
+    && resourceLeaves[0].column.toLowerCase() === resourceColumn.toLowerCase();
 }
 
 function validateUpdateTable(value: unknown, declared: string): ReadonlySet<string> {
@@ -646,6 +645,48 @@ export function validateUpdateOperation(operation: SQLUpdateOperation): {
     }
   });
   return { before, update, readBack };
+}
+
+export function updateOperationUsesProjectedParameter(
+  operation: SQLUpdateOperation,
+  parameter: string,
+  resultField: string,
+): boolean {
+  validateUpdateOperation(operation);
+  const selectOptions = {
+    declaredObjects: [operation.declaredObject],
+    projection: operation.projection,
+  };
+  const before = validateSelectTemplate(operation.beforeSql, selectOptions);
+  const update = validateUpdateTemplate(operation);
+  const readBack = validateSelectTemplate(operation.readBackSql, selectOptions);
+  const projection = operation.projection.find((candidate) => candidate.resultField === resultField);
+  const beforeColumn = projection === undefined
+    ? undefined
+    : before.resultColumns.get(projection.sourceAlias);
+  const readBackColumn = projection === undefined
+    ? undefined
+    : readBack.resultColumns.get(projection.sourceAlias);
+  if (
+    beforeColumn === undefined
+    || readBackColumn === undefined
+    || beforeColumn.toLowerCase() !== readBackColumn.toLowerCase()
+    || before.predicate === null
+    || readBack.predicate === null
+    || !before.predicate.andOnly
+    || !readBack.predicate.andOnly
+  ) return false;
+  const beforeLeaves = before.predicate.leaves.filter((leaf) => leaf.parameter === parameter);
+  const updateGuards = update.guards.filter((guard) => guard.parameter === parameter);
+  const readBackLeaves = readBack.predicate.leaves.filter((leaf) => leaf.parameter === parameter);
+  return beforeLeaves.length === 1
+    && beforeLeaves[0]?.operator === "="
+    && beforeLeaves[0].column.toLowerCase() === beforeColumn.toLowerCase()
+    && updateGuards.length === 1
+    && updateGuards[0]?.column.toLowerCase() === beforeColumn.toLowerCase()
+    && readBackLeaves.length === 1
+    && readBackLeaves[0]?.operator === "="
+    && readBackLeaves[0].column.toLowerCase() === readBackColumn.toLowerCase();
 }
 
 export function validateOperationBeforeExecution(operation: SQLOperation): void {

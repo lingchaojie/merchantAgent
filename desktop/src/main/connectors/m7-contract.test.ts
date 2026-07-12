@@ -118,6 +118,30 @@ describe("fixed M7.1 connector contract", () => {
     expect(() => assertM71Contract({ tools: tools().reverse() }, value.reverse())).not.toThrow();
   });
 
+  it("rejects query_order_status when orderId filters an unrelated column", () => {
+    const value = operations();
+    const operation = value[0];
+    if (operation.kind !== "read") throw new Error("test fixture");
+    operation.sql = operation.sql.replace("order_id = @order_id", "note = @order_id");
+
+    expect(() => assertM71Contract({ tools: tools() }, value)).toThrowError("m7_contract");
+  });
+
+  it.each(["beforeSql", "updateSql", "readBackSql"] as const)(
+    "rejects report_production_progress when workOrderId filters an unrelated column in %s",
+    (target) => {
+      const value = operations();
+      const operation = value[1];
+      if (operation.kind !== "update") throw new Error("test fixture");
+      operation[target] = operation[target].replace(
+        "work_order_id = @workOrderId",
+        "note = @workOrderId",
+      );
+
+      expect(() => assertM71Contract({ tools: tools() }, value)).toThrowError("m7_contract");
+    },
+  );
+
   it.each([
     ["arbitrary tool", (value: PublicToolContract[]) => { value[1].name = "update_order_status"; }],
     ["extra parameter", (value: PublicToolContract[]) => {

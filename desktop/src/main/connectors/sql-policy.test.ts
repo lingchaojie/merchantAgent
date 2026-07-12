@@ -10,6 +10,7 @@ import {
   validateOperationBeforeExecution,
   validateReadOperation,
   validateUpdateOperation,
+  updateOperationUsesProjectedParameter,
 } from "./sql-policy";
 
 export function fixtureReadOperation(): SQLReadOperation {
@@ -73,6 +74,30 @@ export function fixtureUpdateOperation(): SQLUpdateOperation {
     versionField: "row_version",
     timeoutMS: 10_000,
   };
+}
+
+function fixtureProjectedIdentifierUpdate(): SQLUpdateOperation {
+  const operation = fixtureUpdateOperation();
+  operation.beforeSql = operation.beforeSql
+    .replace("o.status AS order_status", "o.work_order_id AS work_order_id, o.status AS order_status")
+    .replace("WHERE o.order_id = @orderId", "WHERE o.order_id = @orderId AND o.work_order_id = @workOrderId");
+  operation.updateSql = operation.updateSql.replace(
+    "WHERE order_id = @orderId",
+    "WHERE order_id = @orderId AND work_order_id = @workOrderId",
+  );
+  operation.readBackSql = operation.beforeSql;
+  operation.bindings.splice(1, 0, {
+    parameter: "workOrderId",
+    argument: "workOrderId",
+    type: "NVarChar",
+    maxLength: 64,
+  });
+  operation.projection.splice(1, 0, {
+    sourceAlias: "work_order_id",
+    resultField: "workOrderId",
+    type: "string",
+  });
+  return operation;
 }
 
 function fixturePayload(operation: SQLReadOperation): ConnectorPrivatePayload {
@@ -339,6 +364,27 @@ describe("restricted T-SQL update policy", () => {
     ]);
     expect([...validated.before.resultAliases]).toEqual(["order_id", "order_status", "row_version"]);
   });
+
+  it("binds a projected identifier to exact before, update, and read-back equality predicates", () => {
+    expect(updateOperationUsesProjectedParameter(
+      fixtureProjectedIdentifierUpdate(),
+      "workOrderId",
+      "workOrderId",
+    )).toBe(true);
+  });
+
+  it.each(["beforeSql", "updateSql", "readBackSql"] as const)(
+    "detects a projected identifier redirected to an unrelated column in %s",
+    (target) => {
+      const operation = fixtureProjectedIdentifierUpdate();
+      operation[target] = operation[target].replace(
+        "work_order_id = @workOrderId",
+        "status = @workOrderId",
+      );
+
+      expect(updateOperationUsesProjectedParameter(operation, "workOrderId", "workOrderId")).toBe(false);
+    },
+  );
 
   it.each([
     ["missing resource predicate", "WHERE row_version = @expectedVersion"],

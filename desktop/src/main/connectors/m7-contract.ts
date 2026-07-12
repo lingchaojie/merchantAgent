@@ -1,5 +1,9 @@
 import type { PublicToolContract, SQLBinding, SQLOperation, SQLUpdateOperation } from "./schema";
-import { validateOperationBeforeExecution } from "./sql-policy";
+import {
+  readOperationUsesResourceParameter,
+  updateOperationUsesProjectedParameter,
+  validateOperationBeforeExecution,
+} from "./sql-policy";
 
 type ParameterType = "string" | "integer";
 
@@ -156,8 +160,21 @@ export function assertM71Contract(
     }
     assertTool(tool, expected);
     const bindings = exactBindings(operation, expected);
-    if (operation.kind === "update") assertUpdateRoles(operation, bindings);
     try {
+      if (operation.kind === "update") {
+        assertUpdateRoles(operation, bindings);
+        const workOrderParameter = bindings.get("workOrderId")?.parameter;
+        if (
+          workOrderParameter === undefined
+          || !updateOperationUsesProjectedParameter(operation, workOrderParameter, "workOrderId")
+        ) contractError();
+      } else {
+        const orderParameter = bindings.get("orderId")?.parameter;
+        if (
+          orderParameter === undefined
+          || !readOperationUsesResourceParameter(operation, orderParameter, "orderId")
+        ) contractError();
+      }
       validateOperationBeforeExecution(operation);
     } catch {
       contractError();

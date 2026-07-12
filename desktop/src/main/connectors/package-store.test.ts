@@ -22,6 +22,33 @@ import type { ConnectorDraft, ConnectorPrivatePayload, InstalledConnectorEnvelop
 const temporaryDirectories: string[] = [];
 const NOW = new Date("2026-07-12T10:00:00Z");
 
+type TargetMutation = {
+  name: string;
+  mutate: (payload: ConnectorPrivatePayload) => void;
+};
+
+const targetMutations: TargetMutation[] = [
+  {
+    name: "read orderId target",
+    mutate: (payload) => {
+      const operation = payload.operations[0];
+      if (operation.kind !== "read") throw new Error("test fixture");
+      operation.sql = operation.sql.replace("order_id = @orderId", "status = @orderId");
+    },
+  },
+  ...(["beforeSql", "updateSql", "readBackSql"] as const).map((target): TargetMutation => ({
+    name: `update workOrderId target in ${target}`,
+    mutate: (payload) => {
+      const operation = payload.operations[1];
+      if (operation.kind !== "update") throw new Error("test fixture");
+      operation[target] = operation[target].replace(
+        "work_order_id = @workOrderId",
+        "status = @workOrderId",
+      );
+    },
+  })),
+];
+
 function temporaryDirectory(): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "connector-package-"));
   temporaryDirectories.push(directory);
@@ -294,6 +321,14 @@ describe("ConnectorPackageStore", () => {
     expect(() => fixture.store.install(draft, NOW)).toThrowError("package_integrity");
   });
 
+  it.each(targetMutations)("rejects a malformed $name before package installation", ({ mutate }) => {
+    const fixture = fixtureStore();
+    const draft = locallyValidatedDraft();
+    mutate(draft.payload);
+
+    expect(() => fixture.store.install(draft, NOW)).toThrowError("package_integrity");
+  });
+
   it("rejects a re-signed fixed-contract binding mismatch while loading a package", () => {
     const fixture = fixtureStore();
     const installed = fixture.store.install(locallyValidatedDraft(), NOW);
@@ -312,6 +347,24 @@ describe("ConnectorPackageStore", () => {
         type: "NVarChar",
         maxLength: 16,
       };
+    }, (input) => identity.sign(input));
+    const malformed = readEnvelope(installed);
+
+    expect(() => fixture.store.loadApproved(installed.ref, malformed.manifest.digest)).toThrowError(
+      "package_integrity",
+    );
+  });
+
+  it.each(targetMutations)("rejects a re-signed malformed $name while loading a package", ({ mutate }) => {
+    const fixture = fixtureStore();
+    const installed = fixture.store.install(locallyValidatedDraft(), NOW);
+    const identity = fixture.identityStore.bindImplementationCredential(
+      readEnvelope(installed).implementationCredential,
+      fixture.platform.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      NOW,
+    );
+    resignEnvelope(installed, fixture.safeStorage, (payload) => {
+      mutate(payload as unknown as ConnectorPrivatePayload);
     }, (input) => identity.sign(input));
     const malformed = readEnvelope(installed);
 

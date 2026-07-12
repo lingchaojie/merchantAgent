@@ -307,7 +307,39 @@ describe("ConnectorRuntime Gate C", () => {
 
     expect(result.error).toBe("permission_denied");
     expect(f.credentialGet).not.toHaveBeenCalled();
+    expect(f.dependencies.createSource).not.toHaveBeenCalled();
   });
+
+  it.each(["beforeSql", "updateSql", "readBackSql"] as const)(
+    "rejects workOrderId targeting an unrelated column in %s before credential or source access",
+    async (target) => {
+      const f = fixture();
+      const connector = loaded();
+      const operation = connector.payload.operations[1];
+      if (operation.kind !== "update") throw new Error("test fixture");
+      operation[target] = operation[target].replace(
+        "work_order_id = @workOrderId",
+        "status = @workOrderId",
+      );
+      f.loadApproved.mockReturnValue(connector);
+
+      const result = await f.runtime.execute(request({
+        tool: "report_production_progress",
+        risk: "low_write",
+        requiresConfirmation: true,
+        args: {
+          orderId: "ORD-1001",
+          workOrderId: "WO-1001",
+          completionRate: 80,
+          expectedVersion: 1,
+        },
+      }), async () => true);
+
+      expect(result.error).toBe("permission_denied");
+      expect(f.credentialGet).not.toHaveBeenCalled();
+      expect(f.dependencies.createSource).not.toHaveBeenCalled();
+    },
+  );
 
   it("dispatches an approved read and returns only projected rows", async () => {
     const f = fixture();
