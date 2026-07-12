@@ -241,9 +241,42 @@ describe("restricted T-SQL read policy", () => {
       "WHERE o.order_id = @orderId",
       "WHERE o.order_id = @orderId AND o.status = @OrderId",
     );
-    operation.bindings.push({ parameter: "OrderId", argument: "otherOrderId", type: "NVarChar" });
+    operation.bindings.push({ parameter: "OrderId", argument: "otherOrderId", type: "NVarChar", maxLength: 64 });
 
     expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: binding_mismatch");
+  });
+
+  it.each([
+    ["missing NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar" }],
+    ["zero NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 0 }],
+    ["oversized NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 4_001 }],
+    ["Int maxLength", { parameter: "orderId", argument: "orderId", type: "Int", maxLength: 4 }],
+  ])("rejects %s during direct policy validation", (_name, binding) => {
+    const operation = fixtureReadOperation();
+    operation.bindings[0] = binding as never;
+
+    expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: binding_mismatch");
+  });
+
+  it("accepts the bounded NVarChar upper limit", () => {
+    const operation = fixtureReadOperation();
+    const binding = operation.bindings[0];
+    if (binding.type !== "NVarChar") throw new Error("invalid fixture");
+    operation.bindings[0] = { ...binding, maxLength: 4_000 };
+
+    expect(() => validateReadOperation(operation)).not.toThrow();
+  });
+
+  it.each([
+    ["missing NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar" }],
+    ["zero NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 0 }],
+    ["oversized NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 4_001 }],
+    ["Int maxLength", { parameter: "orderId", argument: "orderId", type: "Int", maxLength: 4 }],
+  ])("rejects %s during strict payload parsing", (_name, binding) => {
+    const operation = fixtureReadOperation();
+    operation.bindings[0] = binding as never;
+
+    expect(() => parseConnectorPrivatePayload(fixturePayload(operation))).toThrowError(/maxLength/);
   });
 
   it("allows only a fixed TOP equal to maxResults", () => {

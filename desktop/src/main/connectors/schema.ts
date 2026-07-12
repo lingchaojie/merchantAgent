@@ -73,12 +73,14 @@ export interface SQLServerProfile {
   environment: ConnectorEnvironment;
 }
 
-export interface SQLBinding {
+interface SQLBindingBase {
   parameter: string;
   argument: string;
-  type: "NVarChar" | "Int";
-  maxLength?: number;
 }
+
+export type SQLBinding =
+  | (SQLBindingBase & { type: "NVarChar"; maxLength: number })
+  | (SQLBindingBase & { type: "Int"; maxLength?: never });
 
 export interface SQLProjection {
   sourceAlias: string;
@@ -400,14 +402,15 @@ function parseProfile(value: unknown, path: string): SQLServerProfile {
 function parseBinding(value: unknown, path: string): SQLBinding {
   const raw = object(value, path, ["parameter", "argument", "type", "maxLength"]);
   const type = enumValue(raw.type, `${path}.type`, ["NVarChar", "Int"] as const);
-  const maxLength = optionalInteger(raw, "maxLength", path);
-  if (type === "Int" && maxLength !== undefined) fail(`${path}.maxLength`, "is only valid for NVarChar");
-  return {
-    parameter: identifier(raw.parameter, `${path}.parameter`),
-    argument: identifier(raw.argument, `${path}.argument`),
-    type,
-    ...(maxLength === undefined ? {} : { maxLength }),
-  };
+  const parameter = identifier(raw.parameter, `${path}.parameter`);
+  const argument = identifier(raw.argument, `${path}.argument`);
+  if (type === "NVarChar") {
+    const maxLength = optionalInteger(raw, "maxLength", path, 1, 4_000);
+    if (maxLength === undefined) fail(`${path}.maxLength`, "is required for NVarChar");
+    return { parameter, argument, type, maxLength };
+  }
+  if (raw.maxLength !== undefined) fail(`${path}.maxLength`, "is only valid for NVarChar");
+  return { parameter, argument, type };
 }
 
 function parseProjection(value: unknown, path: string): SQLProjection {

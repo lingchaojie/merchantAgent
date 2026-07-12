@@ -409,6 +409,19 @@ function validateSelectTemplate(sql: string, options: SelectValidationOptions): 
 }
 
 function bindingNames(bindings: readonly SQLBinding[]): string[] {
+  for (const binding of bindings) {
+    if (
+      (binding.type === "NVarChar" && (
+        !Number.isSafeInteger(binding.maxLength)
+        || binding.maxLength < 1
+        || binding.maxLength > 4_000
+      ))
+      || (binding.type === "Int" && binding.maxLength !== undefined)
+      || (binding.type !== "NVarChar" && binding.type !== "Int")
+    ) {
+      unsafe("binding_mismatch");
+    }
+  }
   const parameters = orderedUnique(bindings.map((binding) => binding.parameter), "binding_mismatch");
   rejectCaseFoldedDuplicates(parameters, "binding_mismatch");
   return parameters;

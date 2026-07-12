@@ -3,7 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { toMSSQLConfig, validateSQLServerProfile } from "./source-profile";
+import {
+  prepareMSSQLConfig,
+  toMSSQLConfig,
+  validateSQLServerProfile,
+  withMSSQLCredential,
+} from "./source-profile";
 import type { SQLServerProfile } from "./schema";
 
 const MAX_CA_BYTES = 256 * 1024;
@@ -117,6 +122,28 @@ describe("validateSQLServerProfile", () => {
 });
 
 describe("toMSSQLConfig", () => {
+  it("prepares a non-secret config before synchronously adding credentials", () => {
+    const prepared = prepareMSSQLConfig(fixtureProfile());
+
+    expect(prepared).toEqual({
+      server: "sql.test.internal",
+      port: 1433,
+      database: "merchant_test",
+      connectionTimeout: 5_000,
+      requestTimeout: 10_000,
+      options: {
+        encrypt: true,
+        trustServerCertificate: false,
+      },
+    });
+    expect(prepared).not.toHaveProperty("user");
+    expect(prepared).not.toHaveProperty("password");
+
+    const config = withMSSQLCredential(prepared, { username: "agent_test", password: "S3cret!" });
+    expect(config).toMatchObject({ user: "agent_test", password: "S3cret!" });
+    expect(config).not.toBe(prepared);
+  });
+
   it("returns a structured verified-TLS config with credentials and fixed timeouts", () => {
     const config = toMSSQLConfig(fixtureProfile(), {
       username: "agent_test",

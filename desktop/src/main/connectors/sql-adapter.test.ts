@@ -181,6 +181,46 @@ describe("SQLServerAdapter.executeRead", () => {
     expect(vault.get).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["symbol extra", () => {
+      const args: Record<PropertyKey, unknown> = { orderId: "ORD-1001" };
+      args[Symbol("hidden")] = "extra";
+      return args as Record<string, unknown>;
+    }],
+    ["non-enumerable extra", () => {
+      const args = { orderId: "ORD-1001" };
+      Object.defineProperty(args, "hidden", { value: "extra", enumerable: false });
+      return args;
+    }],
+    ["accessor value", () => {
+      const args = {} as Record<string, unknown>;
+      Object.defineProperty(args, "orderId", { get: () => "ORD-1001", enumerable: true });
+      return args;
+    }],
+    ["inherited value", () => {
+      const args = Object.create({ orderId: "ORD-1001" }) as Record<string, unknown>;
+      return args;
+    }],
+    ["non-plain prototype", () => Object.assign(new Date(0), { orderId: "ORD-1001" }) as unknown as Record<string, unknown>],
+    ["prototype pollution shape", () => {
+      const args = Object.create({ polluted: true }) as Record<string, unknown>;
+      args.orderId = "ORD-1001";
+      return args;
+    }],
+  ] as Array<[string, () => Record<string, unknown>]>) (
+    "rejects %s in the closed argument snapshot",
+    async (_name, makeArgs) => {
+      const vault = fakeVault();
+      const pools = factoryFor(fakePool());
+
+      await expect(
+        new SQLServerAdapter(fixtureProfile(), vault, pools).executeRead(fixtureReadOperation(), makeArgs()),
+      ).rejects.toMatchObject({ code: "invalid_argument", message: "invalid_argument" });
+      expect(vault.get).not.toHaveBeenCalled();
+      expect(pools.open).not.toHaveBeenCalled();
+    },
+  );
+
   it("binds integer arguments as Int", async () => {
     const operation = fixtureReadOperation({
       sql: "SELECT TOP 2 o.order_id AS order_id, o.status AS order_status FROM dbo.production_orders AS o WHERE o.version = @version ORDER BY o.order_id ASC",
@@ -196,6 +236,24 @@ describe("SQLServerAdapter.executeRead", () => {
     expect(request.input).toHaveBeenCalledWith("version", mssql.Int, 1);
   });
 
+  it.each([
+    ["missing NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar" }],
+    ["zero NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 0 }],
+    ["oversized NVarChar maxLength", { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 4_001 }],
+    ["Int maxLength", { parameter: "orderId", argument: "orderId", type: "Int", maxLength: 4 }],
+  ])("rejects %s before credential lookup", async (_name, binding) => {
+    const operation = fixtureReadOperation({ bindings: [binding as never] });
+    const vault = fakeVault();
+
+    await expect(
+      new SQLServerAdapter(fixtureProfile(), vault, factoryFor(fakePool())).executeRead(
+        operation,
+        { orderId: binding.type === "Int" ? 1 : "ORD-1001" },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_argument", message: "invalid_argument" });
+    expect(vault.get).not.toHaveBeenCalled();
+  });
+
   it("rejects malformed projected rows without returning driver values", async () => {
     const request = fakeRequest({ recordset: [{ order_id: "ORD-1001", order_status: 42 }] });
 
@@ -205,6 +263,41 @@ describe("SQLServerAdapter.executeRead", () => {
         { orderId: "ORD-1001" },
       ),
     ).rejects.toMatchObject({ code: "failed", message: "failed" });
+  });
+
+  it("uses immutable operation and argument snapshots while a query is in flight", async () => {
+    let resolveQuery!: (value: unknown) => void;
+    const request = fakeRequest();
+    request.query.mockReturnValue(new Promise((resolve) => {
+      resolveQuery = resolve;
+    }));
+    const operation = fixtureReadOperation();
+    const args = { orderId: "ORD-1001" };
+    const execution = new SQLServerAdapter(
+      fixtureProfile(),
+      fakeVault(),
+      factoryFor(fakePool(request)),
+    ).executeRead(operation, args);
+    await vi.waitFor(() => expect(request.query).toHaveBeenCalledOnce());
+
+    operation.projection = [
+      { sourceAlias: "secret_cost", resultField: "secretCost", type: "integer" },
+    ];
+    operation.maxResults = 3;
+    args.orderId = "ORD-CHANGED";
+    resolveQuery({
+      recordset: [
+        { order_id: "ORD-1001", order_status: "ready", secret_cost: 900 },
+        { order_id: "ORD-1002", order_status: "queued", secret_cost: 800 },
+        { order_id: "ORD-1003", order_status: "hidden", secret_cost: 700 },
+      ],
+    });
+
+    await expect(execution).resolves.toEqual([
+      { orderId: "ORD-1001", status: "ready" },
+      { orderId: "ORD-1002", status: "queued" },
+    ]);
+    expect(request.input).toHaveBeenCalledWith("orderId", expect.anything(), "ORD-1001");
   });
 
   it("retries exactly once for a transient connection failure and closes both pools", async () => {
@@ -358,6 +451,68 @@ describe("SQLServerAdapter.executeRead", () => {
     await vi.waitFor(() => expect(pool.close).toHaveBeenCalledOnce());
     expect(pool.request).not.toHaveBeenCalled();
   });
+
+  it("returns promptly when aborted during a stalled credential lookup", async () => {
+    const controller = new AbortController();
+    const vault = fakeVault();
+    vi.mocked(vault.get).mockReturnValue(new Promise(() => undefined));
+    const pools = factoryFor(fakePool());
+    const execution = new SQLServerAdapter(fixtureProfile(), vault, pools).executeRead(
+      fixtureReadOperation(),
+      { orderId: "ORD-1001" },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(vault.get).toHaveBeenCalledOnce());
+
+    controller.abort();
+    const outcome = await Promise.race([
+      execution.then(() => "resolved", () => "aborted"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("deadline"), 25)),
+    ]);
+
+    expect(outcome).toBe("aborted");
+    expect(pools.open).not.toHaveBeenCalled();
+  });
+
+  it("returns a successful read without waiting indefinitely for pool close", async () => {
+    const pool = fakePool(fakeRequest({ recordset: [{ order_id: "ORD-1001", order_status: "ready" }] }));
+    pool.close.mockReturnValue(new Promise(() => undefined));
+    const execution = new SQLServerAdapter(fixtureProfile(), fakeVault(), factoryFor(pool)).executeRead(
+      fixtureReadOperation(),
+      { orderId: "ORD-1001" },
+    );
+
+    const outcome = await Promise.race([
+      execution.then(() => "resolved", () => "rejected"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("deadline"), 250)),
+    ]);
+
+    expect(outcome).toBe("resolved");
+    expect(pool.close).toHaveBeenCalledOnce();
+  });
+
+  it("returns an aborted read without waiting indefinitely for pool close", async () => {
+    const controller = new AbortController();
+    const request = fakeRequest();
+    request.query.mockReturnValue(new Promise(() => undefined));
+    const pool = fakePool(request);
+    pool.close.mockReturnValue(new Promise(() => undefined));
+    const execution = new SQLServerAdapter(fixtureProfile(), fakeVault(), factoryFor(pool)).executeRead(
+      fixtureReadOperation(),
+      { orderId: "ORD-1001" },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(request.query).toHaveBeenCalledOnce());
+
+    controller.abort();
+    const outcome = await Promise.race([
+      execution.then(() => "resolved", () => "aborted"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("deadline"), 250)),
+    ]);
+
+    expect(outcome).toBe("aborted");
+    expect(pool.close).toHaveBeenCalledOnce();
+  });
 });
 
 describe("SQLServerAdapter.testConnection", () => {
@@ -374,6 +529,67 @@ describe("SQLServerAdapter.testConnection", () => {
     expect(result.latencyMS).toBeGreaterThanOrEqual(0);
     expect(request.query).toHaveBeenCalledWith("SELECT 1 AS connection_ok");
     expect(pool.close).toHaveBeenCalledOnce();
+  });
+
+  it("returns promptly when aborted during a stalled credential lookup", async () => {
+    const controller = new AbortController();
+    const vault = fakeVault();
+    vi.mocked(vault.get).mockReturnValue(new Promise(() => undefined));
+    const pools = factoryFor(fakePool());
+    const execution = new SQLServerAdapter(fixtureProfile(), vault, pools).testConnection(controller.signal);
+    await vi.waitFor(() => expect(vault.get).toHaveBeenCalledOnce());
+
+    controller.abort();
+    const outcome = await Promise.race([
+      execution.then(() => "resolved", () => "aborted"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("deadline"), 25)),
+    ]);
+
+    expect(outcome).toBe("aborted");
+    expect(pools.open).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid profile before credential lookup", async () => {
+    const vault = fakeVault();
+    const pools = factoryFor(fakePool());
+
+    await expect(
+      new SQLServerAdapter(fixtureProfile({ server: " " }), vault, pools).testConnection(),
+    ).rejects.toMatchObject({ code: "invalid_argument", message: "invalid_argument" });
+    expect(vault.get).not.toHaveBeenCalled();
+    expect(pools.open).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unavailable CA before credential lookup", async () => {
+    const vault = fakeVault();
+    const pools = factoryFor(fakePool());
+    const caPath = `C:\\missing-${Date.now()}\\ca.pem`;
+
+    await expect(
+      new SQLServerAdapter(fixtureProfile({ caPath }), vault, pools).testConnection(),
+    ).rejects.toMatchObject({ code: "tls_failed", message: "tls_failed" });
+    expect(vault.get).not.toHaveBeenCalled();
+    expect(pools.open).not.toHaveBeenCalled();
+  });
+
+  it("uses an immutable profile snapshot while credential lookup is pending", async () => {
+    let resolveCredential!: (value: { username: string; password: string }) => void;
+    const vault = fakeVault();
+    vi.mocked(vault.get).mockReturnValue(new Promise((resolve) => {
+      resolveCredential = resolve;
+    }));
+    const profile = fixtureProfile();
+    const pool = fakePool(fakeRequest({ recordset: [{ connection_ok: 1 }] }));
+    const pools = factoryFor(pool);
+    const execution = new SQLServerAdapter(profile, vault, pools).testConnection();
+    await vi.waitFor(() => expect(vault.get).toHaveBeenCalledOnce());
+
+    profile.server = "mutated.internal";
+    profile.environment = "preproduction";
+    resolveCredential({ username: "agent_test", password: "test-only-password" });
+
+    await expect(execution).resolves.toMatchObject({ environment: "test" });
+    expect(pools.open).toHaveBeenCalledWith(expect.objectContaining({ server: "sql.test.internal" }));
   });
 });
 

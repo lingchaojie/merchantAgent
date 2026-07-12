@@ -8,6 +8,8 @@ import { ConnectorError, isCredentialRef, type SQLServerProfile } from "./schema
 const MAX_CA_BYTES = 256 * 1024;
 const CERTIFICATE_EXTENSIONS = new Set([".pem", ".crt", ".cer"]);
 
+export type PreparedMSSQLConfig = Readonly<Omit<MSSQLConfig, "user" | "password">>;
+
 function fixedString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -135,11 +137,29 @@ export function validateSQLServerProfile(profile: SQLServerProfile): void {
   }
 }
 
-export function toMSSQLConfig(
-  profile: SQLServerProfile,
+export function prepareMSSQLConfig(profile: SQLServerProfile): PreparedMSSQLConfig {
+  validateSQLServerProfile(profile);
+  const ca = profile.caPath === undefined ? undefined : readLocalCertificate(profile.caPath);
+  const options = Object.freeze({
+    encrypt: true,
+    trustServerCertificate: false,
+    ...(profile.instance === undefined ? {} : { instanceName: profile.instance }),
+    ...(ca === undefined ? {} : { cryptoCredentialsDetails: { ca } }),
+  });
+  return Object.freeze({
+    server: profile.server,
+    ...(profile.port === undefined ? {} : { port: profile.port }),
+    database: profile.database,
+    connectionTimeout: profile.connectTimeoutMS,
+    requestTimeout: profile.queryTimeoutMS,
+    options,
+  });
+}
+
+export function withMSSQLCredential(
+  prepared: PreparedMSSQLConfig,
   credential: ServiceCredential,
 ): MSSQLConfig {
-  validateSQLServerProfile(profile);
   if (
     typeof credential !== "object" ||
     credential === null ||
@@ -149,20 +169,17 @@ export function toMSSQLConfig(
   ) {
     throw new ConnectorError("invalid_credentials", "SQL Server service credential is invalid");
   }
-  const ca = profile.caPath === undefined ? undefined : readLocalCertificate(profile.caPath);
   return {
+    ...prepared,
     user: credential.username,
     password: credential.password,
-    server: profile.server,
-    ...(profile.port === undefined ? {} : { port: profile.port }),
-    database: profile.database,
-    connectionTimeout: profile.connectTimeoutMS,
-    requestTimeout: profile.queryTimeoutMS,
-    options: {
-      encrypt: true,
-      trustServerCertificate: false,
-      ...(profile.instance === undefined ? {} : { instanceName: profile.instance }),
-      ...(ca === undefined ? {} : { cryptoCredentialsDetails: { ca } }),
-    },
+    ...(prepared.options === undefined ? {} : { options: { ...prepared.options } }),
   };
+}
+
+export function toMSSQLConfig(
+  profile: SQLServerProfile,
+  credential: ServiceCredential,
+): MSSQLConfig {
+  return withMSSQLCredential(prepareMSSQLConfig(profile), credential);
 }

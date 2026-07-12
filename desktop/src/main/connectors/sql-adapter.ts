@@ -10,7 +10,11 @@ import {
   type SQLReadOperation,
   type SQLServerProfile,
 } from "./schema";
-import { toMSSQLConfig } from "./source-profile";
+import {
+  prepareMSSQLConfig,
+  type PreparedMSSQLConfig,
+  withMSSQLCredential,
+} from "./source-profile";
 import { validateReadOperation } from "./sql-policy";
 
 export interface SQLPoolFactory {
@@ -41,6 +45,7 @@ const TLS_CODES = new Set([
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
 ]);
 const PERMISSION_NUMBERS = new Set([229, 230, 262, 297, 300, 916]);
+const POOL_CLOSE_GRACE_MS = 100;
 
 function publicError(code: ConnectorErrorCode): ConnectorError {
   const error = new ConnectorError(code, code);
@@ -101,10 +106,135 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) throw abortError();
 }
 
-function runtimeValue(args: Record<string, unknown>, binding: SQLBinding): unknown {
-  const descriptor = Object.getOwnPropertyDescriptor(args, binding.argument);
-  if (descriptor === undefined || !("value" in descriptor)) throw publicError("invalid_argument");
-  const value = descriptor.value;
+function snapshotRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[],
+  failureCode: ConnectorErrorCode = "unsafe_template",
+): ReadonlyMap<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw publicError(failureCode);
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) throw publicError(failureCode);
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
+  const descriptors = new Map<string, unknown>();
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) throw publicError(failureCode);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      throw publicError(failureCode);
+    }
+    descriptors.set(key, descriptor.value);
+  }
+  if (requiredKeys.some((key) => !descriptors.has(key))) throw publicError(failureCode);
+  return descriptors;
+}
+
+function snapshotArray<T>(value: unknown, item: (value: unknown) => T): readonly T[] {
+  if (!Array.isArray(value)) throw publicError("unsafe_template");
+  const ownKeys = Reflect.ownKeys(value);
+  const expectedKeys = new Set<PropertyKey>(["length", ...Array.from({ length: value.length }, (_, index) => String(index))]);
+  if (ownKeys.length !== expectedKeys.size || ownKeys.some((key) => !expectedKeys.has(key))) {
+    throw publicError("unsafe_template");
+  }
+  const snapshot: T[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      throw publicError("unsafe_template");
+    }
+    snapshot.push(item(descriptor.value));
+  }
+  return Object.freeze(snapshot);
+}
+
+function fixedString(value: unknown): string {
+  if (typeof value !== "string") throw publicError("unsafe_template");
+  return value;
+}
+
+function snapshotBinding(value: unknown): SQLBinding {
+  const record = snapshotRecord(value, ["parameter", "argument", "type"], ["maxLength"]);
+  const type = record.get("type");
+  if (type !== "NVarChar" && type !== "Int") throw publicError("unsafe_template");
+  return Object.freeze({
+    parameter: fixedString(record.get("parameter")),
+    argument: fixedString(record.get("argument")),
+    type,
+    ...(record.has("maxLength") ? { maxLength: record.get("maxLength") as number } : {}),
+  }) as SQLBinding;
+}
+
+function snapshotProjection(value: unknown): SQLProjection {
+  const record = snapshotRecord(value, ["sourceAlias", "resultField", "type"], []);
+  const type = record.get("type");
+  if (type !== "string" && type !== "integer") throw publicError("unsafe_template");
+  return Object.freeze({
+    sourceAlias: fixedString(record.get("sourceAlias")),
+    resultField: fixedString(record.get("resultField")),
+    type,
+  });
+}
+
+function snapshotReadOperation(value: unknown): SQLReadOperation {
+  const record = snapshotRecord(value, [
+    "kind", "tool", "sql", "bindings", "projection", "declaredObjects", "maxResults", "timeoutMS",
+  ], []);
+  if (record.get("kind") !== "read") throw publicError("unsafe_template");
+  return Object.freeze({
+    kind: "read",
+    tool: fixedString(record.get("tool")),
+    sql: fixedString(record.get("sql")),
+    bindings: snapshotArray(record.get("bindings"), snapshotBinding) as SQLBinding[],
+    projection: snapshotArray(record.get("projection"), snapshotProjection) as SQLProjection[],
+    declaredObjects: snapshotArray(record.get("declaredObjects"), fixedString) as string[],
+    maxResults: record.get("maxResults") as number,
+    timeoutMS: record.get("timeoutMS") as number,
+  });
+}
+
+function snapshotProfile(value: unknown): SQLServerProfile {
+  const record = snapshotRecord(value, [
+    "profileId", "server", "database", "encrypt", "trustServerCertificate", "connectTimeoutMS",
+    "queryTimeoutMS", "credentialRef", "environment",
+  ], ["instance", "port", "caPath"], "invalid_argument");
+  return Object.freeze({
+    profileId: record.get("profileId") as string,
+    server: record.get("server") as string,
+    ...(record.has("instance") ? { instance: record.get("instance") as string } : {}),
+    ...(record.has("port") ? { port: record.get("port") as number } : {}),
+    database: record.get("database") as string,
+    encrypt: record.get("encrypt") as true,
+    trustServerCertificate: record.get("trustServerCertificate") as false,
+    ...(record.has("caPath") ? { caPath: record.get("caPath") as string } : {}),
+    connectTimeoutMS: record.get("connectTimeoutMS") as number,
+    queryTimeoutMS: record.get("queryTimeoutMS") as number,
+    credentialRef: record.get("credentialRef") as string,
+    environment: record.get("environment") as ConnectorEnvironment,
+  });
+}
+
+async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  throwIfAborted(signal);
+  if (signal === undefined) return promise;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(abortError()));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+function runtimeValue(value: unknown, binding: SQLBinding): unknown {
   if (binding.type === "NVarChar") {
     if (
       typeof value !== "string"
@@ -128,12 +258,26 @@ function validateArguments(operation: SQLReadOperation, args: Record<string, unk
   const prototype = Object.getPrototypeOf(args);
   if (prototype !== Object.prototype && prototype !== null) throw publicError("invalid_argument");
   const argumentNames = new Set(operation.bindings.map((binding) => binding.argument));
-  const suppliedNames = Object.keys(args);
-  if (suppliedNames.length !== argumentNames.size || suppliedNames.some((name) => !argumentNames.has(name))) {
+  const ownKeys = Reflect.ownKeys(args);
+  if (
+    ownKeys.length !== argumentNames.size
+    || ownKeys.some((name) => typeof name !== "string" || !argumentNames.has(name))
+  ) {
     throw publicError("invalid_argument");
   }
+  const argumentValues = new Map<string, unknown>();
+  for (const name of ownKeys) {
+    if (typeof name !== "string") throw publicError("invalid_argument");
+    const descriptor = Object.getOwnPropertyDescriptor(args, name);
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      throw publicError("invalid_argument");
+    }
+    argumentValues.set(name, descriptor.value);
+  }
   const values = new Map<string, unknown>();
-  for (const binding of operation.bindings) values.set(binding.parameter, runtimeValue(args, binding));
+  for (const binding of operation.bindings) {
+    values.set(binding.parameter, runtimeValue(argumentValues.get(binding.argument), binding));
+  }
   return values;
 }
 
@@ -142,7 +286,11 @@ function validateRuntimeOperation(operation: SQLReadOperation): void {
   for (const binding of operation.bindings) {
     if (
       (binding.type !== "NVarChar" && binding.type !== "Int")
-      || (binding.maxLength !== undefined && (!Number.isSafeInteger(binding.maxLength) || binding.maxLength < 1))
+      || (binding.type === "NVarChar" && (
+        !Number.isSafeInteger(binding.maxLength)
+        || binding.maxLength < 1
+        || binding.maxLength > 4_000
+      ))
       || (binding.type === "Int" && binding.maxLength !== undefined)
     ) {
       throw publicError("invalid_argument");
@@ -158,9 +306,7 @@ function bindRequest(
   for (const binding of bindings) {
     const type = binding.type === "Int"
       ? mssql.Int
-      : binding.maxLength === undefined
-        ? mssql.NVarChar
-        : mssql.NVarChar(binding.maxLength);
+      : mssql.NVarChar(binding.maxLength);
     request.input(binding.parameter, type, values.get(binding.parameter));
   }
 }
@@ -235,11 +381,15 @@ async function queryWithAbort(
 
 async function closePoolQuietly(pool: mssql.ConnectionPool | undefined): Promise<void> {
   if (pool === undefined) return;
-  try {
-    await pool.close();
-  } catch {
-    // Cleanup failures never replace the operation's static public result.
-  }
+  const closing = Promise.resolve()
+    .then(async () => pool.close())
+    .then(() => undefined, () => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, POOL_CLOSE_GRACE_MS);
+  });
+  await Promise.race([closing, deadline]);
+  if (timer !== undefined) clearTimeout(timer);
 }
 
 async function openPoolWithAbort(
@@ -286,14 +436,16 @@ export class SQLServerAdapter {
     const startedAt = Date.now();
     let pool: mssql.ConnectionPool | undefined;
     try {
-      const credential = await this.requireCredential();
+      const profile = snapshotProfile(this.profile);
+      const prepared = prepareMSSQLConfig(profile);
+      const credential = await this.requireCredential(profile.credentialRef, signal);
       throwIfAborted(signal);
-      pool = await openPoolWithAbort(this.pools, toMSSQLConfig(this.profile, credential), signal);
+      pool = await openPoolWithAbort(this.pools, withMSSQLCredential(prepared, credential), signal);
       throwIfAborted(signal);
       const request = pool.request();
       const result = await queryWithAbort(request, "SELECT 1 AS connection_ok", signal);
       if (result.recordset[0]?.connection_ok !== 1) throw publicError("connection_failed");
-      return { environment: this.profile.environment, latencyMS: Date.now() - startedAt };
+      return { environment: profile.environment, latencyMS: Date.now() - startedAt };
     } catch (error) {
       throw normalizeFailure(error).error;
     } finally {
@@ -308,12 +460,15 @@ export class SQLServerAdapter {
   ): Promise<Record<string, unknown>[]> {
     try {
       throwIfAborted(signal);
-      validateRuntimeOperation(operation);
-      validateReadOperation(operation);
-      const values = validateArguments(operation, args);
+      const snapshot = snapshotReadOperation(operation);
+      validateRuntimeOperation(snapshot);
+      validateReadOperation(snapshot);
+      const values = validateArguments(snapshot, args);
+      const profile = snapshotProfile(this.profile);
+      const prepared = prepareMSSQLConfig(profile);
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          return await this.readOnce(operation, values, signal);
+          return await this.readOnce(snapshot, values, profile, prepared, signal);
         } catch (error) {
           const normalized = normalizeFailure(error);
           if (attempt === 0 && normalized.transientConnection && signal?.aborted !== true) continue;
@@ -326,8 +481,9 @@ export class SQLServerAdapter {
     }
   }
 
-  private async requireCredential() {
-    const credential = await this.vault.get(this.profile.credentialRef);
+  private async requireCredential(credentialRef: string, signal: AbortSignal | undefined) {
+    throwIfAborted(signal);
+    const credential = await awaitWithAbort(this.vault.get(credentialRef), signal);
     if (credential === null) throw publicError("missing_credentials");
     return credential;
   }
@@ -335,15 +491,17 @@ export class SQLServerAdapter {
   private async readOnce(
     operation: SQLReadOperation,
     values: ReadonlyMap<string, unknown>,
+    profile: SQLServerProfile,
+    prepared: PreparedMSSQLConfig,
     signal: AbortSignal | undefined,
   ): Promise<Record<string, unknown>[]> {
     let pool: mssql.ConnectionPool | undefined;
     try {
       throwIfAborted(signal);
-      const credential = await this.requireCredential();
+      const credential = await this.requireCredential(profile.credentialRef, signal);
       throwIfAborted(signal);
-      const config = toMSSQLConfig(this.profile, credential);
-      config.requestTimeout = Math.min(this.profile.queryTimeoutMS, operation.timeoutMS);
+      const config = withMSSQLCredential(prepared, credential);
+      config.requestTimeout = Math.min(profile.queryTimeoutMS, operation.timeoutMS);
       pool = await openPoolWithAbort(this.pools, config, signal);
       throwIfAborted(signal);
       const request = pool.request();
