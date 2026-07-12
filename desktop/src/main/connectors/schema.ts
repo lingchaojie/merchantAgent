@@ -182,12 +182,27 @@ export class ConnectorSchemaError extends Error {
   }
 }
 
+export class ConnectorError extends Error {
+  constructor(
+    readonly code: ConnectorErrorCode,
+    detail: string,
+  ) {
+    super(`${code}: ${detail}`);
+    this.name = "ConnectorError";
+  }
+}
+
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const CREDENTIAL_REF = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const PACKAGE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const PROTOTYPE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+export function isCredentialRef(value: unknown): value is string {
+  return typeof value === "string" && CREDENTIAL_REF.test(value);
+}
 
 function fail(path: string, detail: string): never {
   throw new ConnectorSchemaError(`${path} ${detail}`);
@@ -368,8 +383,8 @@ function parseProfile(value: unknown, path: string): SQLServerProfile {
     encrypt: true,
     trustServerCertificate: false,
     ...(raw.caPath === undefined ? {} : { caPath: string(raw.caPath, `${path}.caPath`) }),
-    connectTimeoutMS: integer(raw.connectTimeoutMS, `${path}.connectTimeoutMS`),
-    queryTimeoutMS: integer(raw.queryTimeoutMS, `${path}.queryTimeoutMS`),
+    connectTimeoutMS: integer(raw.connectTimeoutMS, `${path}.connectTimeoutMS`, 1_000, 30_000),
+    queryTimeoutMS: integer(raw.queryTimeoutMS, `${path}.queryTimeoutMS`, 1_000, 10_000),
     credentialRef: string(raw.credentialRef, `${path}.credentialRef`),
     environment: enumValue(raw.environment, `${path}.environment`, ["test", "preproduction"] as const),
   };
