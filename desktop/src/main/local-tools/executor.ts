@@ -155,13 +155,17 @@ function sqlResumeArguments(
     });
   }
   const needsNextVersion = operation.bindings.some((binding) => binding.argument === "nextVersion");
-  if (needsNextVersion && !Object.prototype.hasOwnProperty.call(snapshot, "nextVersion")) {
-    const expectedVersion = snapshot.expectedVersion;
+  const expectedVersion = snapshot.expectedVersion;
+  if (
+    needsNextVersion
+    && !Object.prototype.hasOwnProperty.call(snapshot, "nextVersion")
+    && Number.isSafeInteger(expectedVersion)
+  ) {
     Object.defineProperty(snapshot, "nextVersion", {
       configurable: false,
       enumerable: true,
       writable: false,
-      value: Number.isSafeInteger(expectedVersion) ? (expectedVersion as number) + 1 : expectedVersion,
+      value: (expectedVersion as number) + 1,
     });
   }
   return Object.freeze(snapshot);

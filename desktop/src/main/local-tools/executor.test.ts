@@ -428,6 +428,68 @@ describe("LocalToolExecutor", () => {
     expect(runtime.adapter.executeConfirmedUpdate).not.toHaveBeenCalled();
   });
 
+  it("checks an existing key with missing expectedVersion using exact public JSON arguments", async () => {
+    const runtime = sqlRuntime({
+      resumeUpdate: vi.fn().mockRejectedValue(Object.assign(new Error("static"), { code: "source_conflict" })),
+    });
+    const missingVersion = progressRequest({
+      args: {
+        orderId: "SO-1001",
+        workOrderId: "WO-1001",
+        completionRate: 80,
+        note: "waiting for QA",
+      },
+    });
+
+    const response = await new LocalToolExecutor(pkg, store, runtime).execute(missingVersion, vi.fn());
+
+    expect(runtime.adapter.resumeUpdate).toHaveBeenCalledWith(
+      runtime.operation,
+      {
+        orderId: "SO-1001",
+        workOrderId: "WO-1001",
+        completionRate: 80,
+        note: "waiting for QA",
+      },
+      "idem-1",
+    );
+    const existingResumeArgs = vi.mocked(runtime.adapter.resumeUpdate).mock.calls[0]?.[1];
+    expect(Reflect.ownKeys(existingResumeArgs ?? {})).not.toContain("nextVersion");
+    expect(response).toMatchObject({ error: "source_conflict", meta: { status: "source_conflict" } });
+    expect(runtime.adapter.previewUpdate).not.toHaveBeenCalled();
+    expect(runtime.adapter.executeConfirmedUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing-key request without expectedVersion before preview or pending", async () => {
+    const runtime = sqlRuntime();
+    const missingVersion = progressRequest({
+      args: {
+        orderId: "SO-1001",
+        workOrderId: "WO-1001",
+        completionRate: 80,
+        note: "waiting for QA",
+      },
+    });
+
+    const response = await new LocalToolExecutor(pkg, store, runtime).execute(missingVersion, vi.fn());
+
+    expect(runtime.adapter.resumeUpdate).toHaveBeenCalledWith(
+      runtime.operation,
+      {
+        orderId: "SO-1001",
+        workOrderId: "WO-1001",
+        completionRate: 80,
+        note: "waiting for QA",
+      },
+      "idem-1",
+    );
+    const missingResumeArgs = vi.mocked(runtime.adapter.resumeUpdate).mock.calls[0]?.[1];
+    expect(Reflect.ownKeys(missingResumeArgs ?? {})).not.toContain("nextVersion");
+    expect(response).toMatchObject({ error: "invalid_argument", meta: { status: "failed" } });
+    expect(runtime.adapter.previewUpdate).not.toHaveBeenCalled();
+    expect(runtime.adapter.executeConfirmedUpdate).not.toHaveBeenCalled();
+  });
+
   it("preserves confirmation metadata when SQL finalization is unknown", async () => {
     const runtime = sqlRuntime({
       executeConfirmedUpdate: vi.fn().mockRejectedValue(Object.assign(new Error("hidden"), { code: "unknown" })),
