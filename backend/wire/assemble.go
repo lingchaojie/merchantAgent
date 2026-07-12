@@ -40,6 +40,7 @@ type Assembled struct {
 	Cfg       *config.Store
 	Sk        *skill.Store
 	Registry  *connectorregistry.Store
+	Catalog   connector.ToolCatalog
 	Conns     []connector.Connector // server connectors + desktop proxy
 
 	erp *erp.ERP
@@ -104,10 +105,17 @@ func Assemble(ctx context.Context, cfg Config) (*Assembled, error) {
 	audit := runtime.NewTenantAudit()
 	resolver := NewResolver(store, sk, cfg.Tenant)
 	conns := enterpriseConnectors(e, c)
+	published := connectorregistry.NewPublishedCatalog(registry, cfg.Tenant)
+	catalog := composeToolCatalog(conns, published)
 	agent := runtime.NewLLMAgent(cfg.Provider, conns, runtime.NewGuard(store, cfg.Tenant), resolver, audit, cfg.Tenant).
+		WithCatalog(published).
 		WithAmbient(localfile.Tools()...) // local files via the desktop reverse bridge
 
-	return &Assembled{Agent: agent, IDP: idp, Audit: audit, Store: store, Projector: projector, Cfg: cf, Sk: sk, Registry: registry, Conns: conns, erp: e, crm: c}, nil
+	return &Assembled{Agent: agent, IDP: idp, Audit: audit, Store: store, Projector: projector, Cfg: cf, Sk: sk, Registry: registry, Catalog: catalog, Conns: conns, erp: e, crm: c}, nil
+}
+
+func composeToolCatalog(conns []connector.Connector, published connector.ToolCatalog) connector.ToolCatalog {
+	return connector.NewCompositeCatalog(connector.NewStaticCatalog(conns...), published)
 }
 
 func enterpriseConnectors(e, c connector.Connector) []connector.Connector {

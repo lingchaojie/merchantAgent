@@ -57,6 +57,8 @@ func (s EventSink) emit(e Event) {
 
 const loadSkillTool = "load_skill"
 
+var ErrToolUnavailable = errors.New("tool unavailable")
+
 // LLMAgent is the Phase 1 orchestrator: an LLM tool-calling loop with
 // progressive disclosure (skill index resident, playbooks loaded on demand),
 // the guard enforced on every tool call, and hash-chained audit. Replaces the
@@ -68,6 +70,7 @@ type LLMAgent struct {
 	roles   RoleResolver
 	audit   Appender
 	tenant  string
+	catalog connector.ToolCatalog
 	tools   map[string]connector.Tool // name → tool, across all connectors
 	ambient map[string]connector.Tool // always-on tools (local files); no guard
 	maxIter int
@@ -86,17 +89,38 @@ func (a *LLMAgent) WithAmbient(tools ...connector.Tool) *LLMAgent {
 	return a
 }
 
+// WithCatalog adds a dynamic source after the existing catalog. The added
+// catalog therefore wins when both expose the same stable tool name.
+func (a *LLMAgent) WithCatalog(catalog connector.ToolCatalog) *LLMAgent {
+	if catalog == nil {
+		return a
+	}
+	if a.catalog == nil && len(a.tools) > 0 {
+		a.catalog = runtimeStaticCatalog{tools: a.tools}
+	}
+	a.catalog = connector.NewCompositeCatalog(a.catalog, catalog)
+	return a
+}
+
 // NewLLMAgent wires the loop over a set of connectors (ERP + CRM + …). audit may
 // be a single *AuditLog or a *TenantAudit (per-tenant chains).
 func NewLLMAgent(prov provider.Provider, conns []connector.Connector, g *Guard, sr SkillResolver, audit Appender, tenant string) *LLMAgent {
-	tools := map[string]connector.Tool{}
-	for _, c := range conns {
-		for _, t := range c.Tools() {
-			tools[t.Spec().Name] = t
-		}
-	}
+	catalog := connector.NewStaticCatalog(conns...)
+	tools, _ := catalog.Snapshot(context.Background())
 	rr, _ := sr.(RoleResolver)
-	return &LLMAgent{prov: prov, guard: g, skills: sr, roles: rr, audit: audit, tenant: tenant, tools: tools, maxIter: 8}
+	return &LLMAgent{prov: prov, guard: g, skills: sr, roles: rr, audit: audit, tenant: tenant, tools: tools, catalog: catalog, maxIter: 8}
+}
+
+type runtimeStaticCatalog struct {
+	tools map[string]connector.Tool
+}
+
+func (c runtimeStaticCatalog) Snapshot(context.Context) (map[string]connector.Tool, error) {
+	tools := make(map[string]connector.Tool, len(c.tools))
+	for name, tool := range c.tools {
+		tools[name] = tool
+	}
+	return tools, nil
 }
 
 // loadSkillDef advertises the meta-tool that reveals a skill's playbook + unlocks
@@ -124,7 +148,23 @@ func toolDef(spec connector.ToolSpec) provider.ToolDef {
 		if typ == "" {
 			typ = connector.ParamString
 		}
-		props[p.Name] = map[string]any{"type": string(typ), "description": p.Description}
+		property := map[string]any{"type": string(typ), "description": p.Description}
+		if p.MinLength != nil {
+			property["minLength"] = *p.MinLength
+		}
+		if p.MaxLength != nil {
+			property["maxLength"] = *p.MaxLength
+		}
+		if p.Minimum != nil {
+			property["minimum"] = *p.Minimum
+		}
+		if p.Maximum != nil {
+			property["maximum"] = *p.Maximum
+		}
+		if len(p.Enum) > 0 {
+			property["enum"] = append([]any(nil), p.Enum...)
+		}
+		props[p.Name] = property
 		if p.Required {
 			required = append(required, p.Name)
 		}
@@ -213,6 +253,10 @@ func (a *LLMAgent) visibleDomains(ctx context.Context, p org.Principal, index []
 // Ask runs one turn for a principal, returning the final text and the updated
 // message history (for multi-turn sessions). Events stream via sink.
 func (a *LLMAgent) Ask(ctx context.Context, p org.Principal, history []provider.Message, question string, sink EventSink) (string, []provider.Message, error) {
+	turnTools, err := a.toolSnapshot(ctx)
+	if err != nil {
+		return "", history, fmt.Errorf("resolve tool catalog: %w", err)
+	}
 	index, err := a.skills.UsableSkills(ctx, p)
 	if err != nil {
 		return "", history, fmt.Errorf("resolve skills: %w", err)
@@ -268,7 +312,15 @@ func (a *LLMAgent) Ask(ctx context.Context, p org.Principal, history []provider.
 		}
 
 		for _, tc := range out.ToolCalls {
-			result := a.dispatch(ctx, p, tc, byID, unlockedBy, &toolDefs, turn, sink)
+			name := tc.Function.Name
+			if name != loadSkillTool {
+				if _, ambient := a.ambient[name]; !ambient {
+					if _, available := turnTools[name]; !available {
+						return "", msgs, fmt.Errorf("%w: %s", ErrToolUnavailable, name)
+					}
+				}
+			}
+			result := a.dispatchWithTools(ctx, p, tc, byID, unlockedBy, &toolDefs, turn, sink, turnTools)
 			msgs = append(msgs, provider.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 		}
 	}
@@ -284,10 +336,17 @@ type turnMeta struct {
 // the tool-result content to feed back to the model.
 func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.ToolCall,
 	byID map[string]SkillInfo, unlockedBy map[string]string, toolDefs *[]provider.ToolDef, turn turnMeta, sink EventSink) string {
+	tools, _ := a.toolSnapshot(ctx)
+	return a.dispatchWithTools(ctx, p, tc, byID, unlockedBy, toolDefs, turn, sink, tools)
+}
+
+func (a *LLMAgent) dispatchWithTools(ctx context.Context, p org.Principal, tc provider.ToolCall,
+	byID map[string]SkillInfo, unlockedBy map[string]string, toolDefs *[]provider.ToolDef, turn turnMeta, sink EventSink,
+	turnTools map[string]connector.Tool) string {
 
 	name := tc.Function.Name
 	sink.emit(Event{Kind: "tool_call", Tool: name})
-	installedTool, installed := a.tools[name]
+	installedTool, installed := turnTools[name]
 	args := map[string]any{}
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil || args == nil {
 		if installed {
@@ -308,7 +367,7 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 		}
 		for _, tn := range sk.AllowedTools {
 			if _, unlocked := unlockedBy[tn]; !unlocked {
-				if tool, found := a.tools[tn]; found {
+				if tool, found := turnTools[tn]; found {
 					unlockedBy[tn] = sk.ID
 					*toolDefs = append(*toolDefs, toolDef(tool.Spec()))
 				}
@@ -408,8 +467,9 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 
 // UsedToolNames returns the connector tool names (for tests/introspection).
 func (a *LLMAgent) UsedToolNames() []string {
-	names := make([]string, 0, len(a.tools))
-	for n := range a.tools {
+	tools, _ := a.toolSnapshot(context.Background())
+	names := make([]string, 0, len(tools))
+	for n := range tools {
 		names = append(names, n)
 	}
 	return names
@@ -418,11 +478,26 @@ func (a *LLMAgent) UsedToolNames() []string {
 // ToolSpec exposes the effective registered tool contract. When connectors
 // publish the same name, this is the spec from the last registered connector.
 func (a *LLMAgent) ToolSpec(name string) (connector.ToolSpec, bool) {
-	tool, ok := a.tools[name]
+	tools, err := a.toolSnapshot(context.Background())
+	if err != nil {
+		return connector.ToolSpec{}, false
+	}
+	tool, ok := tools[name]
 	if !ok {
 		return connector.ToolSpec{}, false
 	}
 	return tool.Spec().WithDefaults(), true
+}
+
+func (a *LLMAgent) toolSnapshot(ctx context.Context) (map[string]connector.Tool, error) {
+	if a.catalog != nil {
+		return a.catalog.Snapshot(ctx)
+	}
+	tools := make(map[string]connector.Tool, len(a.tools))
+	for name, tool := range a.tools {
+		tools[name] = tool
+	}
+	return tools, nil
 }
 
 // record appends an audit entry for a tool decision (nil-safe).

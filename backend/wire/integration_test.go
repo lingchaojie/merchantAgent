@@ -104,6 +104,44 @@ func TestEnterpriseConnectorsRegisterDesktopProxyLast(t *testing.T) {
 	}
 }
 
+type wireCatalog struct {
+	tools map[string]connector.Tool
+}
+
+func (c wireCatalog) Snapshot(context.Context) (map[string]connector.Tool, error) {
+	return c.tools, nil
+}
+
+type wireTool struct {
+	spec connector.ToolSpec
+}
+
+func (t wireTool) Spec() connector.ToolSpec { return t.spec }
+func (wireTool) Invoke(context.Context, map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+
+func TestPublishedCatalogReplacesReferenceProxy(t *testing.T) {
+	conns := enterpriseConnectors(mustERP(t), mustCRM(t))
+	published := wireTool{spec: connector.ToolSpec{
+		PackageID: "sql-orders", Version: "2.0.0", ManifestDigest: "sha256:approved",
+		Name: "query_order_status", Execution: connector.ExecutionDesktop,
+	}}
+	catalog := composeToolCatalog(conns, wireCatalog{tools: map[string]connector.Tool{
+		"query_order_status": published,
+	}})
+	tools, err := catalog.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tools["query_order_status"].Spec(); got.PackageID != "sql-orders" || got.Version != "2.0.0" {
+		t.Fatalf("effective query_order_status = %+v, want published SQL proxy", got)
+	}
+	if tools["report_production_progress"] == nil {
+		t.Fatal("non-overridden reference tool was not preserved")
+	}
+}
+
 func TestOpenConnectorRegistryUsesConfiguredPath(t *testing.T) {
 	registry, err := openConnectorRegistry(filepath.Join(t.TempDir(), "connectors.db"))
 	if err != nil {

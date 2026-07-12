@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"sort"
+
+	"github.com/merchantagent/backend/connector"
 )
 
 // adminChecker is the minimal authz surface requireAdmin needs (authz.Store fits).
@@ -47,20 +49,27 @@ func (s *server) handleTools(w http.ResponseWriter, r *http.Request) {
 		Risk                 string `json:"risk"`
 		RequiresConfirmation bool   `json:"requiresConfirmation"`
 	}
-	byName := make(map[string]toolInfo)
-	for _, c := range s.asm.Conns {
-		for _, t := range c.Tools() {
-			sp := t.Spec().WithDefaults()
-			byName[sp.Name] = toolInfo{
-				Name:                 sp.Name,
-				Description:          sp.Description,
-				DataDomain:           sp.DataDomain,
-				PackageID:            sp.PackageID,
-				Version:              sp.Version,
-				Execution:            string(sp.Execution),
-				Risk:                 string(sp.Risk),
-				RequiresConfirmation: sp.RequiresConfirmation,
-			}
+	catalog := s.asm.Catalog
+	if catalog == nil {
+		catalog = connector.NewStaticCatalog(s.asm.Conns...)
+	}
+	tools, err := catalog.Snapshot(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	byName := make(map[string]toolInfo, len(tools))
+	for _, t := range tools {
+		sp := t.Spec().WithDefaults()
+		byName[sp.Name] = toolInfo{
+			Name:                 sp.Name,
+			Description:          sp.Description,
+			DataDomain:           sp.DataDomain,
+			PackageID:            sp.PackageID,
+			Version:              sp.Version,
+			Execution:            string(sp.Execution),
+			Risk:                 string(sp.Risk),
+			RequiresConfirmation: sp.RequiresConfirmation,
 		}
 	}
 	names := make([]string, 0, len(byName))

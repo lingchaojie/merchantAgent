@@ -36,6 +36,11 @@ type ParamSpec struct {
 	Description string
 	Type        ParamType
 	Required    bool
+	MinLength   *int
+	MaxLength   *int
+	Minimum     *int
+	Maximum     *int
+	Enum        []any
 }
 
 // ToolSpec declares a tool AND its authorization footprint. The runtime guard

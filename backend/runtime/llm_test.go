@@ -49,6 +49,107 @@ func TestToolDefUsesDeclaredParamTypes(t *testing.T) {
 	}
 }
 
+func TestToolDefIncludesPublishedParamConstraints(t *testing.T) {
+	minLength, maxLength, minimum, maximum := 1, 64, 0, 100
+	def := toolDef(connector.ToolSpec{Params: []connector.ParamSpec{
+		{Name: "orderId", MinLength: &minLength, MaxLength: &maxLength, Enum: []any{"SO-1001"}},
+		{Name: "progress", Type: connector.ParamInteger, Minimum: &minimum, Maximum: &maximum},
+	}})
+	properties := def.Function.Parameters["properties"].(map[string]any)
+	orderID := properties["orderId"].(map[string]any)
+	if orderID["minLength"] != 1 || orderID["maxLength"] != 64 || !reflect.DeepEqual(orderID["enum"], []any{"SO-1001"}) {
+		t.Fatalf("orderId schema = %#v", orderID)
+	}
+	progress := properties["progress"].(map[string]any)
+	if progress["minimum"] != 0 || progress["maximum"] != 100 {
+		t.Fatalf("progress schema = %#v", progress)
+	}
+}
+
+type mutableCatalog struct {
+	tools map[string]connector.Tool
+}
+
+func (c *mutableCatalog) Snapshot(context.Context) (map[string]connector.Tool, error) {
+	out := make(map[string]connector.Tool, len(c.tools))
+	for name, tool := range c.tools {
+		out[name] = tool
+	}
+	return out, nil
+}
+
+func (c *mutableCatalog) set(tool connector.Tool) {
+	c.tools = map[string]connector.Tool{tool.Spec().Name: tool}
+}
+
+func (c *mutableCatalog) clear() { c.tools = nil }
+
+func TestAgentSnapshotsToolsForEachTurn(t *testing.T) {
+	catalog := &mutableCatalog{}
+	tool := &countingTool{spec: connector.ToolSpec{Name: "query_order_status"}}
+	newAgent := func() *LLMAgent {
+		return NewLLMAgent(
+			&provider.Fake{Steps: []provider.Message{
+				provider.Call("load-1", "load_skill", map[string]any{"skillId": "orders"}),
+				provider.Call("call-1", "query_order_status", map[string]any{}),
+				provider.Text("done"),
+			}},
+			nil,
+			NewGuard(fakeChecker{allow: map[string]bool{"user:u1|invoker|tool:t/query_order_status": true}}, "t"),
+			fakeResolver{skills: []SkillInfo{{
+				ID: "orders", Name: "Orders", AllowedTools: []string{"query_order_status"},
+			}}},
+			NewAuditLog(), "t",
+		).WithCatalog(catalog)
+	}
+	catalog.set(tool)
+	if _, _, err := newAgent().Ask(context.Background(), org.Principal{TenantID: "t", UserID: "u1"}, nil, "status", nil); err != nil {
+		t.Fatal(err)
+	}
+	catalog.clear()
+	_, _, err := newAgent().Ask(context.Background(), org.Principal{TenantID: "t", UserID: "u1"}, nil, "status", nil)
+	if !errors.Is(err, ErrToolUnavailable) {
+		t.Fatalf("revoked turn error=%v", err)
+	}
+}
+
+type revokingProvider struct {
+	catalog *mutableCatalog
+	step    int
+}
+
+func (p *revokingProvider) Complete(_ context.Context, _ provider.Request) (provider.Message, error) {
+	p.step++
+	if p.step == 1 {
+		p.catalog.clear()
+		return provider.Call("load-1", "load_skill", map[string]any{"skillId": "orders"}), nil
+	}
+	if p.step == 2 {
+		return provider.Call("call-1", "query_order_status", map[string]any{}), nil
+	}
+	return provider.Text("done"), nil
+}
+
+func TestAgentUsesOneCatalogSnapshotForWholeTurn(t *testing.T) {
+	catalog := &mutableCatalog{}
+	tool := &countingTool{spec: connector.ToolSpec{Name: "query_order_status"}}
+	catalog.set(tool)
+	agent := NewLLMAgent(
+		&revokingProvider{catalog: catalog}, nil,
+		NewGuard(fakeChecker{allow: map[string]bool{"user:u1|invoker|tool:t/query_order_status": true}}, "t"),
+		fakeResolver{skills: []SkillInfo{{
+			ID: "orders", Name: "Orders", AllowedTools: []string{"query_order_status"},
+		}}},
+		NewAuditLog(), "t",
+	).WithCatalog(catalog)
+	if _, _, err := agent.Ask(context.Background(), org.Principal{TenantID: "t", UserID: "u1"}, nil, "status", nil); err != nil {
+		t.Fatal(err)
+	}
+	if tool.invocations != 1 {
+		t.Fatalf("tool invocations = %d, want 1 from turn snapshot", tool.invocations)
+	}
+}
+
 type countingChecker struct{ calls int }
 
 func (c *countingChecker) Check(context.Context, string, string, string) (bool, error) {
