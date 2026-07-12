@@ -1,4 +1,4 @@
-package e2e
+﻿package e2e
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"github.com/merchantagent/backend/org"
 )
 
-func TestE2E_SameQuestionDifferentPermissions(t *testing.T) {
+func TestE2E_SameQuestionDifferentRights(t *testing.T) {
 	agent, audit := newAgent(t)
 	ctx := context.Background()
 	p := func(u string) org.Principal { return org.Principal{TenantID: tenant, UserID: u} }
@@ -40,10 +40,10 @@ func TestE2E_SameQuestionDifferentPermissions(t *testing.T) {
 		t.Error("boss/profit should be allowed (root manager)")
 	}
 
-	// 5. Planner asks sales-dept order progress → denied (not a viewer).
+	// 5. Planner is a production operator and has the order-status skill.
 	ans, _ = agent.Ask(ctx, p("u_plan"), "SO-1001 进度怎么样")
-	if !ans.Denied {
-		t.Errorf("planner/progress should be denied, got %q", ans.Text)
+	if ans.Denied {
+		t.Errorf("planner/progress should be allowed, got %q", ans.Text)
 	}
 
 	// 6. Sales asks kitting → allowed, incomplete (螺栓 short).

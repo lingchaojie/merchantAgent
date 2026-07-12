@@ -11,7 +11,16 @@ export interface Skill {
   playbookMd: string; allowedTools: string[]; dataDomains: string[];
   roles: string[]; sourceTemplateId?: string;
 }
-export interface ToolInfo { name: string; description: string; dataDomain?: string }
+export interface ToolInfo {
+  name: string;
+  description: string;
+  dataDomain?: string;
+  packageId: string;
+  version: string;
+  execution: "server" | "desktop";
+  risk: "read" | "low_write" | "high_write";
+  requiresConfirmation: boolean;
+}
 export interface Template {
   templateId: string; name: string; description: string;
   playbookMd: string; allowedTools: string[]; dataDomains: string[];

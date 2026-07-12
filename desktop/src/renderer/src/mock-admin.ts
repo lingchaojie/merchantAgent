@@ -35,13 +35,14 @@ const SEED_GRANTS: Grant[] = [
 ];
 
 const SEED_TOOLS: ToolInfo[] = [
-  { name: "query_order_status", description: "查询订单进度/交期", dataDomain: "orders" },
-  { name: "query_order_financials", description: "查询订单成本/利润", dataDomain: "cost" },
-  { name: "check_material_kitting", description: "查询齐套/欠料", dataDomain: "orders" },
-  { name: "query_customer_orders", description: "查询客户订单", dataDomain: "orders" },
-  { name: "query_customer_contacts", description: "查询客户联系人", dataDomain: "customer" },
-  { name: "query_customer_followups", description: "查询客户跟进", dataDomain: "customer" },
-  { name: "query_customer_opportunities", description: "查询客户商机", dataDomain: "customer" },
+  { name: "check_material_kitting", description: "查询齐套/欠料", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_customer_contacts", description: "查询客户联系人", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_customer_followups", description: "查询客户跟进", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_customer_opportunities", description: "查询客户商机", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_customer_orders", description: "查询客户订单", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_order_financials", description: "查询订单成本/利润", dataDomain: "cost", packageId: "", version: "", execution: "server", risk: "read", requiresConfirmation: false },
+  { name: "query_order_status", description: "查询订单及本地生产进度（不含成本利润）", packageId: "reference-manufacturing", version: "1.0.0", execution: "desktop", risk: "read", requiresConfirmation: false },
+  { name: "report_production_progress", description: "更新订单的本地生产进度", packageId: "reference-manufacturing", version: "1.0.0", execution: "desktop", risk: "low_write", requiresConfirmation: true },
 ];
 
 const ORDER_PLAYBOOK = "当用户问某订单情况时：\n1. query_order_status 取状态/交期/客户\n2. check_material_kitting 看齐套欠料\n3. 若用户有财务权限，query_order_financials 补成本/利润\n4. 汇总成话；欠料且临近交期→标红预警";

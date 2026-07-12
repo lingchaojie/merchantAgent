@@ -42,8 +42,9 @@ func seedStore(t *testing.T) (*authz.Store, *skill.Store) {
 		t.Fatal(err)
 	}
 	fx := sync.Diff{Writes: []sync.Tuple{
-		{User: "user:u_sales1", Relation: "owner", Object: "order:" + fgaObj("SO-1001")},
-		{User: "department:" + fgaObj("d_sales"), Relation: "owner_dept", Object: "order:" + fgaObj("SO-1001")},
+		{User: "user:u_sales1", Relation: "owner", Object: "business_record:" + fgaObj("order/SO-1001")},
+		{User: "department:" + fgaObj("d_sales"), Relation: "owner_dept", Object: "business_record:" + fgaObj("order/SO-1001")},
+		{User: "department:" + fgaObj("d_prod") + "#member", Relation: "operator", Object: "business_record:" + fgaObj("order/SO-1001")},
 		{User: "user:u_fin", Relation: "viewer", Object: "data_domain:" + fgaObj("cost")},
 		{User: "department:" + fgaObj("d_sales") + "#manager", Relation: "viewer", Object: "data_domain:" + fgaObj("cost")},
 		{User: "department:" + fgaObj("d_root") + "#manager", Relation: "viewer", Object: "data_domain:" + fgaObj("cost")},
@@ -60,6 +61,47 @@ func seedStore(t *testing.T) (*authz.Store, *skill.Store) {
 		t.Fatal(err)
 	}
 	return store, sk
+}
+
+func TestProductionProgressAuthorization(t *testing.T) {
+	store, sk := seedStore(t)
+	defer sk.Close()
+	ctx := context.Background()
+	record := "business_record:" + fgaObj("order/SO-1001")
+
+	viewer, err := store.Check(ctx, "user:u_plan", "viewer", record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !viewer {
+		t.Fatal("u_plan should be a viewer of the production record")
+	}
+	invoker, err := store.Check(ctx, "user:u_plan", "invoker", "tool:"+fgaObj("report_production_progress"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !invoker {
+		t.Fatal("u_plan should be able to invoke report_production_progress")
+	}
+	invoker, err = store.Check(ctx, "user:u_sales1", "invoker", "tool:"+fgaObj("report_production_progress"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invoker {
+		t.Fatal("u_sales1 must not be able to invoke report_production_progress")
+	}
+}
+
+func TestEnterpriseConnectorsRegisterDesktopProxyLast(t *testing.T) {
+	conns := enterpriseConnectors(mustERP(t), mustCRM(t))
+	agent := runtime.NewLLMAgent(nil, conns, nil, nil, nil, tenant)
+	spec, ok := agent.ToolSpec("query_order_status")
+	if !ok {
+		t.Fatal("query_order_status missing")
+	}
+	if spec.Execution != connector.ExecutionDesktop {
+		t.Fatalf("query_order_status execution = %q, want desktop", spec.Execution)
+	}
 }
 
 func liveAgent(t *testing.T) (*runtime.LLMAgent, *runtime.AuditLog, *skill.Store) {

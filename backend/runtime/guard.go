@@ -57,18 +57,26 @@ func (g *Guard) Authorize(ctx context.Context, p org.Principal, spec connector.T
 		return Decision{false, "no skill grants tool " + spec.Name}, nil
 	}
 
-	// Record-level data authz: can the user view the specific resource?
+	// Record-level data authz: does the user have the relation declared by the
+	// tool? Existing tools default to viewer; writes can require operator.
 	if spec.ResourceType != "" && spec.ResourceArg != "" {
 		id, ok := args[spec.ResourceArg].(string)
 		if !ok || id == "" {
 			return Decision{false, "missing resource id arg " + spec.ResourceArg}, nil
 		}
-		ok, err := g.chk.Check(ctx, user, "viewer", g.obj(spec.ResourceType, id))
+		if spec.ResourceKind != "" {
+			id = spec.ResourceKind + "/" + id
+		}
+		relation := spec.ResourceRelation
+		if relation == "" {
+			relation = "viewer"
+		}
+		ok, err := g.chk.Check(ctx, user, relation, g.obj(spec.ResourceType, id))
 		if err != nil {
 			return Decision{}, err
 		}
 		if !ok {
-			return Decision{false, fmt.Sprintf("no access to %s %s", spec.ResourceType, id)}, nil
+			return Decision{false, fmt.Sprintf("no %s access to %s %s", relation, spec.ResourceType, id)}, nil
 		}
 	}
 

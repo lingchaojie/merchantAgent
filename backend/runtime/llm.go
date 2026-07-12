@@ -3,9 +3,11 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/merchantagent/backend/connector"
 	"github.com/merchantagent/backend/org"
@@ -28,6 +30,12 @@ type SkillInfo struct {
 // pre-filter / progressive-disclosure surface (design §4).
 type SkillResolver interface {
 	UsableSkills(ctx context.Context, p org.Principal) ([]SkillInfo, error)
+}
+
+// RoleResolver returns the role ids assigned to a principal. The runtime calls
+// it once at turn start and carries the sorted snapshot through every invocation.
+type RoleResolver interface {
+	RoleIDs(ctx context.Context, p org.Principal) ([]string, error)
 }
 
 // Event is a streamed step of one turn (agentd relays these over SSE).
@@ -57,6 +65,7 @@ type LLMAgent struct {
 	prov    provider.Provider
 	guard   *Guard
 	skills  SkillResolver
+	roles   RoleResolver
 	audit   Appender
 	tenant  string
 	tools   map[string]connector.Tool // name → tool, across all connectors
@@ -86,7 +95,8 @@ func NewLLMAgent(prov provider.Provider, conns []connector.Connector, g *Guard, 
 			tools[t.Spec().Name] = t
 		}
 	}
-	return &LLMAgent{prov: prov, guard: g, skills: sr, audit: audit, tenant: tenant, tools: tools, maxIter: 8}
+	rr, _ := sr.(RoleResolver)
+	return &LLMAgent{prov: prov, guard: g, skills: sr, roles: rr, audit: audit, tenant: tenant, tools: tools, maxIter: 8}
 }
 
 // loadSkillDef advertises the meta-tool that reveals a skill's playbook + unlocks
@@ -110,7 +120,11 @@ func toolDef(spec connector.ToolSpec) provider.ToolDef {
 	props := map[string]any{}
 	var required []string
 	for _, p := range spec.Params {
-		props[p.Name] = map[string]any{"type": "string", "description": p.Description}
+		typ := p.Type
+		if typ == "" {
+			typ = connector.ParamString
+		}
+		props[p.Name] = map[string]any{"type": string(typ), "description": p.Description}
 		if p.Required {
 			required = append(required, p.Name)
 		}
@@ -207,6 +221,15 @@ func (a *LLMAgent) Ask(ctx context.Context, p org.Principal, history []provider.
 	for _, s := range index {
 		byID[s.ID] = s
 	}
+	roleIDs := []string(nil)
+	if a.roles != nil {
+		roleIDs, err = a.roles.RoleIDs(ctx, p)
+		if err != nil {
+			return "", history, fmt.Errorf("resolve roles: %w", err)
+		}
+		sort.Strings(roleIDs)
+	}
+	turn := turnMeta{RoleIDs: append([]string(nil), roleIDs...), DeviceID: connector.DeviceIDFrom(ctx)}
 
 	msgs := history
 	if len(msgs) == 0 {
@@ -217,7 +240,7 @@ func (a *LLMAgent) Ask(ctx context.Context, p org.Principal, history []provider.
 
 	// Tools start with load_skill + any ambient tools (local files); loading a
 	// skill unlocks its connector tools.
-	available := map[string]bool{}
+	unlockedBy := map[string]string{}
 	toolDefs := []provider.ToolDef{loadSkillDef()}
 	ambientNames := make([]string, 0, len(a.ambient))
 	for n := range a.ambient {
@@ -225,7 +248,7 @@ func (a *LLMAgent) Ask(ctx context.Context, p org.Principal, history []provider.
 	}
 	sort.Strings(ambientNames) // deterministic tool order
 	for _, n := range ambientNames {
-		available[n] = true
+		unlockedBy[n] = ""
 		toolDefs = append(toolDefs, toolDef(a.ambient[n].Spec()))
 	}
 
@@ -245,22 +268,36 @@ func (a *LLMAgent) Ask(ctx context.Context, p org.Principal, history []provider.
 		}
 
 		for _, tc := range out.ToolCalls {
-			result := a.dispatch(ctx, p, tc, byID, available, &toolDefs, sink)
+			result := a.dispatch(ctx, p, tc, byID, unlockedBy, &toolDefs, turn, sink)
 			msgs = append(msgs, provider.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
 		}
 	}
 	return "", msgs, fmt.Errorf("max iterations (%d) exceeded", a.maxIter)
 }
 
+type turnMeta struct {
+	RoleIDs  []string
+	DeviceID string
+}
+
 // dispatch executes one tool call (load_skill or a connector tool) and returns
 // the tool-result content to feed back to the model.
 func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.ToolCall,
-	byID map[string]SkillInfo, available map[string]bool, toolDefs *[]provider.ToolDef, sink EventSink) string {
+	byID map[string]SkillInfo, unlockedBy map[string]string, toolDefs *[]provider.ToolDef, turn turnMeta, sink EventSink) string {
 
-	args := map[string]any{}
-	_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 	name := tc.Function.Name
-	sink.emit(Event{Kind: "tool_call", Tool: name, Data: args})
+	sink.emit(Event{Kind: "tool_call", Tool: name})
+	installedTool, installed := a.tools[name]
+	args := map[string]any{}
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil || args == nil {
+		if installed {
+			skillID := unlockedBy[name]
+			spec := installedTool.Spec()
+			_ = a.record(p, spec, nil, Decision{Allowed: false, Reason: "invalid tool arguments JSON"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
+			a.emitToolState(sink, spec, name, "failed")
+		}
+		return "工具参数无效：JSON 格式错误"
+	}
 
 	// Progressive disclosure: load_skill reveals a playbook + unlocks its tools.
 	if name == loadSkillTool {
@@ -270,9 +307,9 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 			return fmt.Sprintf("技能 %q 不可用（不在你的可用技能内）。", id)
 		}
 		for _, tn := range sk.AllowedTools {
-			if !available[tn] {
+			if _, unlocked := unlockedBy[tn]; !unlocked {
 				if tool, found := a.tools[tn]; found {
-					available[tn] = true
+					unlockedBy[tn] = sk.ID
 					*toolDefs = append(*toolDefs, toolDef(tool.Spec()))
 				}
 			}
@@ -285,10 +322,16 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 	// Ambient tool (local files): no skill gate, no OpenFGA guard — it self-gates
 	// on the client (fsguard + confirmation). Audited as an ambient action.
 	if at, ok := a.ambient[name]; ok {
-		a.record(p, name, args, Decision{Allowed: true, Reason: "ambient (client-gated)"})
+		if err := connector.ValidateArgs(at.Spec(), args); err != nil {
+			return fmt.Sprintf("工具参数无效：%v", err)
+		}
 		data, err := at.Invoke(ctx, args)
 		if err != nil {
+			_ = a.record(p, at.Spec(), args, Decision{Allowed: true, Reason: "ambient (client-gated)"}, "", tc.ID, turn, executionStatus(err, connector.ExecutionMeta{}), connector.ExecutionMeta{})
 			return fmt.Sprintf("本地文件操作失败：%v", err)
+		}
+		if err := a.record(p, at.Spec(), args, Decision{Allowed: true, Reason: "ambient (client-gated)"}, "", tc.ID, turn, "succeeded", connector.ExecutionMeta{}); err != nil {
+			return "审计记录失败，未返回工具结果"
 		}
 		sink.emit(Event{Kind: "tool_result", Tool: name, Data: data})
 		b, _ := json.Marshal(data)
@@ -296,27 +339,70 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 	}
 
 	// A connector tool. Must be unlocked by a loaded skill first.
-	tool, found := a.tools[name]
-	if !found || !available[name] {
+	tool, found := installedTool, installed
+	skillID, unlocked := unlockedBy[name]
+	if !found {
 		return fmt.Sprintf("工具 %q 尚未通过技能解锁或不存在。", name)
 	}
 	spec := tool.Spec()
+	if !unlocked || skillID == "" {
+		decision := Decision{Allowed: false, Reason: "tool not unlocked by an authorized skill"}
+		_ = a.record(p, spec, args, decision, "", tc.ID, turn, "denied", connector.ExecutionMeta{})
+		sink.emit(Event{Kind: "denied", Tool: name})
+		return fmt.Sprintf("tool %q is not unlocked by an authorized skill", name)
+	}
+	if err := connector.ValidateArgs(spec, args); err != nil {
+		_ = a.record(p, spec, args, Decision{Allowed: false, Reason: "invalid tool arguments"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
+		a.emitToolState(sink, spec, name, "failed")
+		return fmt.Sprintf("工具参数无效：%v", err)
+	}
 
 	dec, err := a.guard.Authorize(ctx, p, spec, args)
 	if err != nil {
+		_ = a.record(p, spec, args, Decision{Allowed: false, Reason: "authorization backend error"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
+		a.emitToolState(sink, spec, name, "failed")
 		return fmt.Sprintf("鉴权错误：%v", err)
 	}
-	a.record(p, name, args, dec)
 	if !dec.Allowed {
+		_ = a.record(p, spec, args, dec, skillID, tc.ID, turn, "denied", connector.ExecutionMeta{})
 		sink.emit(Event{Kind: "denied", Tool: name})
 		return "无权限执行该操作（" + dec.Reason + "）。请如实告知用户此项不可得。"
 	}
-	data, err := tool.Invoke(ctx, args)
+	invocation := connector.InvocationMeta{
+		TenantID: p.TenantID, UserID: p.UserID, SkillID: skillID, CallID: tc.ID,
+		DeviceID: turn.DeviceID, RoleIDs: append([]string(nil), turn.RoleIDs...),
+	}
+	invokeCtx := connector.WithInvocation(ctx, invocation)
+	if spec.WithDefaults().Execution == connector.ExecutionDesktop {
+		sink.emit(Event{Kind: "tool_state", Tool: name, Data: map[string]any{"status": "executing"}})
+	}
+	data, err := invokeSafely(tool, invokeCtx, args)
+	meta := connector.PopExecutionMeta(data)
+	status := executionStatus(err, meta)
+	auditDecision := dec
+	if spec.WithDefaults().Execution == connector.ExecutionDesktop {
+		var metaErr error
+		meta, status, metaErr = validateDesktopExecution(spec, invocation, meta, err)
+		if metaErr != nil {
+			auditDecision.Reason = metaErr.Error()
+		}
+	}
+	if auditErr := a.record(p, spec, args, auditDecision, skillID, tc.ID, turn, status, meta); auditErr != nil {
+		a.emitToolState(sink, spec, name, "failed")
+		return "审计记录失败，未返回工具结果"
+	}
+	if spec.WithDefaults().Execution == connector.ExecutionDesktop {
+		sink.emit(Event{Kind: "tool_state", Tool: name, Data: map[string]any{"status": status}})
+	}
 	if err != nil {
 		return fmt.Sprintf("工具执行出错：%v", err)
 	}
-	sink.emit(Event{Kind: "tool_result", Tool: name, Data: data})
-	b, _ := json.Marshal(data)
+	if status != "succeeded" {
+		return fmt.Sprintf("工具执行未成功：%s", status)
+	}
+	public := filterResult(data, spec.ResultFields, spec.WithDefaults().Execution == connector.ExecutionDesktop)
+	sink.emit(Event{Kind: "tool_result", Tool: name, Data: public})
+	b, _ := json.Marshal(public)
 	return string(b)
 }
 
@@ -329,18 +415,149 @@ func (a *LLMAgent) UsedToolNames() []string {
 	return names
 }
 
+// ToolSpec exposes the effective registered tool contract. When connectors
+// publish the same name, this is the spec from the last registered connector.
+func (a *LLMAgent) ToolSpec(name string) (connector.ToolSpec, bool) {
+	tool, ok := a.tools[name]
+	if !ok {
+		return connector.ToolSpec{}, false
+	}
+	return tool.Spec().WithDefaults(), true
+}
+
 // record appends an audit entry for a tool decision (nil-safe).
-func (a *LLMAgent) record(p org.Principal, tool string, args map[string]any, d Decision) {
+func (a *LLMAgent) record(p org.Principal, spec connector.ToolSpec, args map[string]any, d Decision, skillID, toolCallID string, turn turnMeta, status string, meta connector.ExecutionMeta) error {
 	if a.audit == nil {
-		return
+		return nil
 	}
 	decision := "allow"
 	if !d.Allowed {
 		decision = "deny"
 	}
-	a.audit.Append(AuditEntry{
-		TenantID: p.TenantID, UserID: p.UserID, Tool: tool, Args: args,
-		Decision: decision, Reason: d.Reason,
+	spec = spec.WithDefaults()
+	resourceID, _ := args[spec.ResourceArg].(string)
+	return a.audit.Append(AuditEntry{
+		TenantID: p.TenantID, UserID: p.UserID, SkillID: skillID,
+		RoleIDs: append([]string(nil), turn.RoleIDs...), DeviceID: turn.DeviceID,
+		Tool: spec.Name, ToolCallID: toolCallID, ToolVersion: spec.Version, ExecutionLocation: string(spec.Execution), Risk: string(spec.Risk),
+		Args: args, Decision: decision, Status: status, Reason: d.Reason,
+		ExecutionID: meta.ExecutionID, IdempotencyKey: meta.IdempotencyKey,
+		Confirmed: meta.Confirmed, ConfirmedAt: meta.ConfirmedAt, ResourceID: resourceID,
+		Before: meta.Before, After: meta.After,
 	})
 }
 
+func (a *LLMAgent) emitToolState(sink EventSink, spec connector.ToolSpec, tool, status string) {
+	if spec.WithDefaults().Execution == connector.ExecutionDesktop {
+		sink.emit(Event{Kind: "tool_state", Tool: tool, Data: map[string]any{"status": status}})
+	}
+}
+
+func invokeSafely(tool connector.Tool, ctx context.Context, args map[string]any) (data map[string]any, err error) {
+	defer func() {
+		if recover() != nil {
+			data = nil
+			err = errors.New("connector panic")
+		}
+	}()
+	return tool.Invoke(ctx, args)
+}
+
+func executionStatus(err error, meta connector.ExecutionMeta) string {
+	if err != nil {
+		switch meta.Status {
+		case "failed", "cancelled", "source_conflict", "unknown":
+			return meta.Status
+		}
+		if errors.Is(err, context.Canceled) {
+			return "cancelled"
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "unknown"
+		}
+		return "failed"
+	}
+	switch meta.Status {
+	case "", "succeeded":
+		return "succeeded"
+	case "failed", "cancelled", "source_conflict", "unknown":
+		return meta.Status
+	default:
+		return "unknown"
+	}
+}
+
+func validateDesktopExecution(spec connector.ToolSpec, invocation connector.InvocationMeta, meta connector.ExecutionMeta, invokeErr error) (connector.ExecutionMeta, string, error) {
+	expectedKey := connector.ExpectedIdempotencyKey(invocation, spec.Name)
+	transportTerminal := ""
+	switch {
+	case errors.Is(invokeErr, context.Canceled):
+		transportTerminal = "cancelled"
+	case errors.Is(invokeErr, context.DeadlineExceeded):
+		transportTerminal = "unknown"
+	case invokeErr != nil && strings.TrimSpace(meta.ExecutionID) == "" && (meta.Status == "cancelled" || meta.Status == "unknown"):
+		transportTerminal = meta.Status
+	}
+	if transportTerminal != "" {
+		return connector.ExecutionMeta{Status: transportTerminal, IdempotencyKey: expectedKey}, transportTerminal,
+			errors.New("local bridge ended before execution identity was available")
+	}
+	invalid := func(reason string) (connector.ExecutionMeta, string, error) {
+		status := "unknown"
+		if invokeErr != nil {
+			status = "failed"
+		}
+		return connector.ExecutionMeta{Status: status, IdempotencyKey: expectedKey}, status, errors.New(reason)
+	}
+	if meta.IdempotencyKey == "" {
+		return invalid("execution metadata missing idempotency key")
+	}
+	if meta.IdempotencyKey != expectedKey {
+		return invalid("execution metadata idempotency mismatch")
+	}
+	if strings.TrimSpace(meta.ExecutionID) == "" {
+		return invalid("execution metadata missing execution id")
+	}
+	switch meta.Status {
+	case "succeeded", "failed", "cancelled", "source_conflict", "unknown":
+	default:
+		return invalid("execution metadata has invalid status")
+	}
+	if invokeErr != nil && meta.Status == "succeeded" {
+		return invalid("execution metadata contradicts invocation error")
+	}
+	if meta.ConfirmedAt != "" {
+		if _, err := time.Parse(time.RFC3339, meta.ConfirmedAt); err != nil {
+			return invalid("execution metadata has invalid confirmation time")
+		}
+	}
+	if meta.Status == "succeeded" && spec.RequiresConfirmation {
+		if !meta.Confirmed {
+			return invalid("execution metadata missing confirmation")
+		}
+		if meta.ConfirmedAt == "" {
+			return invalid("execution metadata missing confirmation time")
+		}
+	}
+	return meta, meta.Status, nil
+}
+
+func filterResult(data map[string]any, fields []string, enforceAllowlist bool) map[string]any {
+	if data == nil {
+		return map[string]any{}
+	}
+	if len(fields) == 0 && !enforceAllowlist {
+		return data
+	}
+	allowed := make(map[string]bool, len(fields))
+	for _, field := range fields {
+		allowed[field] = true
+	}
+	out := make(map[string]any, len(fields))
+	for key, value := range data {
+		if allowed[key] && key != connector.ExecutionMetaKey {
+			out[key] = value
+		}
+	}
+	return out
+}

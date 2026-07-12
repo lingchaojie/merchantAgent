@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/merchantagent/backend/connector"
+	"github.com/merchantagent/backend/connector/clientexec"
 	"github.com/merchantagent/backend/provider"
 	"github.com/merchantagent/backend/wire"
 )
@@ -18,6 +21,74 @@ type fakeChecker struct{ admins map[string]bool }
 
 func (f fakeChecker) Check(_ context.Context, user, relation, object string) (bool, error) {
 	return f.admins[user], nil
+}
+
+type adminCatalogTool struct{ spec connector.ToolSpec }
+
+func (t adminCatalogTool) Spec() connector.ToolSpec { return t.spec }
+func (adminCatalogTool) Invoke(context.Context, map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+
+type adminCatalogConnector struct {
+	name  string
+	tools []connector.Tool
+}
+
+func (c adminCatalogConnector) Name() string            { return c.name }
+func (c adminCatalogConnector) Tools() []connector.Tool { return c.tools }
+
+func TestAdminToolsDeduplicatesAndExposesExecutionMetadata(t *testing.T) {
+	legacy := adminCatalogConnector{name: "erp", tools: []connector.Tool{
+		adminCatalogTool{spec: connector.ToolSpec{Name: "query_order_status", Description: "ERP status"}},
+		adminCatalogTool{spec: connector.ToolSpec{Name: "z_legacy_report", Description: "Legacy report"}},
+	}}
+	srv := &server{asm: &wire.Assembled{Conns: []connector.Connector{legacy, clientexec.NewReference()}}}
+	w := httptest.NewRecorder()
+	srv.handleTools(w, httptest.NewRequest(http.MethodGet, "/admin/tools", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /admin/tools: %d %s", w.Code, w.Body.String())
+	}
+	var got []struct {
+		Name                 string `json:"name"`
+		Description          string `json:"description"`
+		PackageID            string `json:"packageId"`
+		Version              string `json:"version"`
+		Execution            string `json:"execution"`
+		Risk                 string `json:"risk"`
+		RequiresConfirmation bool   `json:"requiresConfirmation"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode tools: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("tools count = %d, want 3 (duplicate query_order_status removed): %+v", len(got), got)
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw tools: %v", err)
+	}
+	confirmation, exists := raw[0]["requiresConfirmation"]
+	if !exists || string(confirmation) != "false" {
+		t.Fatalf("query_order_status requiresConfirmation JSON = %s, exists=%v; want explicit false", confirmation, exists)
+	}
+	wantNames := []string{"query_order_status", "report_production_progress", "z_legacy_report"}
+	for i, want := range wantNames {
+		if got[i].Name != want {
+			t.Fatalf("tool[%d].name = %q, want %q", i, got[i].Name, want)
+		}
+	}
+	query := got[0]
+	if query.Description != "查询订单及本地生产进度（不含成本利润）" ||
+		query.PackageID != "reference-manufacturing" || query.Version != "1.0.0" ||
+		query.Execution != "desktop" || query.Risk != "read" || query.RequiresConfirmation {
+		t.Fatalf("query_order_status metadata = %+v", query)
+	}
+	legacyTool := got[2]
+	if legacyTool.Execution != "server" || legacyTool.Risk != "read" {
+		t.Fatalf("legacy defaults = execution %q risk %q, want server/read", legacyTool.Execution, legacyTool.Risk)
+	}
 }
 
 func TestRequireAdmin(t *testing.T) {

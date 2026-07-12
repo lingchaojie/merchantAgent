@@ -7,6 +7,7 @@ import (
 	"github.com/merchantagent/backend/authz"
 	"github.com/merchantagent/backend/config"
 	"github.com/merchantagent/backend/connector"
+	"github.com/merchantagent/backend/connector/clientexec"
 	"github.com/merchantagent/backend/connector/crm"
 	"github.com/merchantagent/backend/connector/erp"
 	"github.com/merchantagent/backend/connector/localfile"
@@ -36,7 +37,7 @@ type Assembled struct {
 	Projector *Projector
 	Cfg       *config.Store
 	Sk        *skill.Store
-	Conns     []connector.Connector // ERP + CRM, for the tool catalog
+	Conns     []connector.Connector // server connectors + desktop proxy
 
 	erp *erp.ERP
 	crm *crm.CRM
@@ -90,11 +91,17 @@ func Assemble(ctx context.Context, cfg Config) (*Assembled, error) {
 
 	audit := runtime.NewTenantAudit()
 	resolver := NewResolver(store, sk, cfg.Tenant)
-	conns := []connector.Connector{e, c}
+	conns := enterpriseConnectors(e, c)
 	agent := runtime.NewLLMAgent(cfg.Provider, conns, runtime.NewGuard(store, cfg.Tenant), resolver, audit, cfg.Tenant).
 		WithAmbient(localfile.Tools()...) // local files via the desktop reverse bridge
 
 	return &Assembled{Agent: agent, IDP: idp, Audit: audit, Store: store, Projector: projector, Cfg: cf, Sk: sk, Conns: conns, erp: e, crm: c}, nil
+}
+
+func enterpriseConnectors(e, c connector.Connector) []connector.Connector {
+	// Last registration wins in LLMAgent. Keep the desktop proxy last so it owns
+	// query_order_status while ERP still provides financial, kitting, and list tools.
+	return []connector.Connector{e, c, clientexec.NewReference()}
 }
 
 // Close releases the connector, skill, and config stores.

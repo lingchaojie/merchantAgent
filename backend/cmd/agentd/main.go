@@ -16,16 +16,18 @@ import (
 	"os"
 	"sync"
 
+	"github.com/merchantagent/backend/connector"
 	"github.com/merchantagent/backend/provider"
 	"github.com/merchantagent/backend/wire"
 )
 
 type server struct {
-	asm      *wire.Assembled
-	tenant   string
-	mu       sync.Mutex
-	sessions map[string][]provider.Message // sessionId → history (per-session)
-	pending  map[string]chan fileResult    // reqId → waiting file bridge request
+	asm          *wire.Assembled
+	tenant       string
+	mu           sync.Mutex
+	pendingTools map[string]chan connector.LocalToolResponse
+	sessions     map[string][]provider.Message // sessionId → history (per-session)
+	pending      map[string]chan fileResult    // reqId → waiting file bridge request
 }
 
 func main() {
@@ -64,8 +66,9 @@ func main() {
 
 	s := &server{
 		asm: asm, tenant: tenant,
-		sessions: map[string][]provider.Message{},
-		pending:  map[string]chan fileResult{},
+		sessions:     map[string][]provider.Message{},
+		pending:      map[string]chan fileResult{},
+		pendingTools: map[string]chan connector.LocalToolResponse{},
 	}
 	log.Printf("agentd listening on %s (tenant=%s, openfga=%s, model=%s)", addr, tenant, apiURL, envOr("LLM_MODEL", "gpt-5.5"))
 	log.Fatal(http.ListenAndServe(addr, s.routes()))
@@ -77,6 +80,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/chat", s.handleChat)
 	mux.HandleFunc("/chat/file-result", s.handleFileResult)
+	mux.HandleFunc("/chat/local-tool-result", s.handleLocalToolResult)
 	mux.HandleFunc("/audit", s.handleAudit)
 
 	admin := func(h http.HandlerFunc) http.HandlerFunc { return requireAdmin(s.asm.Store, s.tenant, h) }

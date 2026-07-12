@@ -20,7 +20,9 @@ export interface ChatEvent {
     | "final" // final assistant text
     | "done" // stream complete
     | "error" // turn failed
-    | "file_request"; // (M4b) backend asks the client to read/write a local file
+    | "file_request" // (M4b) backend asks the client to read/write a local file
+    | "local_tool_request" // backend asks Electron main to execute a verified local tool
+    | "tool_state"; // local tool execution state
   text?: string;
   tool?: string;
   data?: Record<string, unknown>;
@@ -31,6 +33,40 @@ export interface ChatEvent {
   op?: "read" | "write";
   path?: string;
   content?: string;
+}
+
+export interface LocalToolRequest {
+  reqId: string;
+  packageId: string;
+  packageVersion: string;
+  manifestDigest: string;
+  tool: string;
+  tenantId: string;
+  userId: string;
+  deviceId: string;
+  roleIds: string[];
+  skillId: string;
+  callId: string;
+  idempotencyKey: string;
+  risk: "read" | "low_write" | "high_write";
+  requiresConfirmation: boolean;
+  args: Record<string, unknown>;
+}
+
+export interface ExecutionMeta {
+  status: "succeeded" | "failed" | "cancelled" | "source_conflict" | "unknown";
+  executionId: string;
+  idempotencyKey: string;
+  confirmed: boolean;
+  confirmedAt?: string;
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+}
+
+export interface LocalToolResponse {
+  data?: Record<string, unknown>;
+  meta: ExecutionMeta;
+  error?: string;
 }
 
 /** Request payload for a chat turn. */

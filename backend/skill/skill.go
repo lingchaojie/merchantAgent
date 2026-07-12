@@ -65,6 +65,10 @@ func Open() (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("skill seed: %w", err)
 	}
+	if err := applyMigrations(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -94,6 +98,10 @@ func OpenFile(path string) (*Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("skill seed: %w", err)
 		}
+	}
+	if err := applyMigrations(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }

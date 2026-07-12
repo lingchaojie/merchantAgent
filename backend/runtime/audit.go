@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -15,23 +16,38 @@ import (
 // AuditEntry is one recorded agent action. Entries are hash-chained: each
 // entry's Hash covers the previous Hash, so any tampering breaks the chain.
 type AuditEntry struct {
-	Seq      int            `json:"seq"`
-	Time     time.Time      `json:"time"`
-	TenantID string         `json:"tenantId"`
-	UserID   string         `json:"userId"`
-	Question string         `json:"question"`
-	Tool     string         `json:"tool"`
-	Args     map[string]any `json:"args"`
-	Decision string         `json:"decision"` // "allow" | "deny"
-	Reason   string         `json:"reason"`
-	PrevHash string         `json:"prevHash"`
-	Hash     string         `json:"hash"`
+	Seq               int            `json:"seq"`
+	Time              time.Time      `json:"time"`
+	TenantID          string         `json:"tenantId"`
+	UserID            string         `json:"userId"`
+	Question          string         `json:"question"`
+	SkillID           string         `json:"skillId,omitempty"`
+	RoleIDs           []string       `json:"roleIds,omitempty"`
+	DeviceID          string         `json:"deviceId,omitempty"`
+	Tool              string         `json:"tool"`
+	ToolCallID        string         `json:"toolCallId,omitempty"`
+	ToolVersion       string         `json:"toolVersion,omitempty"`
+	ExecutionLocation string         `json:"executionLocation,omitempty"`
+	Risk              string         `json:"risk,omitempty"`
+	Args              map[string]any `json:"args"`
+	Decision          string         `json:"decision"` // "allow" | "deny"
+	Status            string         `json:"status,omitempty"`
+	Reason            string         `json:"reason"`
+	ExecutionID       string         `json:"executionId,omitempty"`
+	IdempotencyKey    string         `json:"idempotencyKey,omitempty"`
+	Confirmed         bool           `json:"confirmed"`
+	ConfirmedAt       string         `json:"confirmedAt,omitempty"`
+	ResourceID        string         `json:"resourceId,omitempty"`
+	Before            map[string]any `json:"before,omitempty"`
+	After             map[string]any `json:"after,omitempty"`
+	PrevHash          string         `json:"prevHash"`
+	Hash              string         `json:"hash"`
 }
 
 // Appender records audit entries. *AuditLog (single chain) and *TenantAudit
 // (one chain per tenant) both satisfy it, so the runtime is agnostic.
 type Appender interface {
-	Append(AuditEntry) AuditEntry
+	Append(AuditEntry) error
 }
 
 // AuditLog is an in-memory hash-chained log (Phase 0; a real impl ships entries
@@ -66,31 +82,44 @@ func (ta *TenantAudit) Chain(tenantID string) *AuditLog {
 }
 
 // Append routes an entry to its tenant's chain (by entry.TenantID).
-func (ta *TenantAudit) Append(e AuditEntry) AuditEntry {
+func (ta *TenantAudit) Append(e AuditEntry) error {
 	return ta.Chain(e.TenantID).Append(e)
 }
 
 // Append records an entry, computing its hash over (prevHash + entry payload).
-func (a *AuditLog) Append(e AuditEntry) AuditEntry {
+func (a *AuditLog) Append(e AuditEntry) error {
+	cloned, err := cloneAuditEntry(e)
+	if err != nil {
+		return fmt.Errorf("copy audit entry: %w", err)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	e.Seq = len(a.entries) + 1
-	if e.Time.IsZero() {
-		e.Time = time.Now().UTC()
+	cloned.Seq = len(a.entries) + 1
+	if cloned.Time.IsZero() {
+		cloned.Time = time.Now().UTC()
 	}
-	e.PrevHash = a.lastHash
-	e.Hash = hashEntry(e)
-	a.lastHash = e.Hash
-	a.entries = append(a.entries, e)
-	return e
+	cloned.PrevHash = a.lastHash
+	cloned.Hash, err = hashEntry(cloned)
+	if err != nil {
+		return fmt.Errorf("hash audit entry: %w", err)
+	}
+	a.lastHash = cloned.Hash
+	a.entries = append(a.entries, cloned)
+	return nil
 }
 
 // Entries returns a copy of the log.
 func (a *AuditLog) Entries() []AuditEntry {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := make([]AuditEntry, len(a.entries))
-	copy(out, a.entries)
+	out := make([]AuditEntry, 0, len(a.entries))
+	for _, entry := range a.entries {
+		cloned, err := cloneAuditEntry(entry)
+		if err != nil {
+			return nil
+		}
+		out = append(out, cloned)
+	}
 	return out
 }
 
@@ -103,7 +132,8 @@ func (a *AuditLog) Verify() bool {
 		if e.PrevHash != prev {
 			return false
 		}
-		if e.Hash != hashEntry(e) {
+		hash, err := hashEntry(e)
+		if err != nil || e.Hash != hash {
 			return false
 		}
 		prev = e.Hash
@@ -112,9 +142,24 @@ func (a *AuditLog) Verify() bool {
 }
 
 // hashEntry hashes the entry payload excluding its own Hash field.
-func hashEntry(e AuditEntry) string {
+func hashEntry(e AuditEntry) (string, error) {
 	e.Hash = ""
-	b, _ := json.Marshal(e)
+	b, err := json.Marshal(e)
+	if err != nil {
+		return "", err
+	}
 	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func cloneAuditEntry(e AuditEntry) (AuditEntry, error) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return AuditEntry{}, err
+	}
+	var cloned AuditEntry
+	if err := json.Unmarshal(b, &cloned); err != nil {
+		return AuditEntry{}, err
+	}
+	return cloned, nil
 }

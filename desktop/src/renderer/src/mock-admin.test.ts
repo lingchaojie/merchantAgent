@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Grant, Role, Rule, Skill } from "./admin";
+import type { Grant, Role, Rule, Skill, ToolInfo } from "./admin";
 import { createMockAdmin } from "./mock-admin";
 
 const adminUser = "u_boss";
@@ -10,6 +10,31 @@ describe("browser admin mock", () => {
 
     expect(await admin({ method: "GET", path: "/admin/roles", userId: "u_sales1" }))
       .toMatchObject({ ok: false, status: 403 });
+  });
+
+  it("lists tool execution metadata", async () => {
+    const admin = createMockAdmin();
+
+    const listed = await admin({ method: "GET", path: "/admin/tools", userId: adminUser });
+    if (!listed.ok) throw new Error(listed.error);
+    const tools = listed.data as ToolInfo[];
+
+    expect(tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: "report_production_progress",
+        packageId: "reference-manufacturing",
+        version: "1.0.0",
+        execution: "desktop",
+        risk: "low_write",
+        requiresConfirmation: true,
+      }),
+    ]));
+    const domainTools = tools
+      .filter((tool) => tool.dataDomain !== undefined)
+      .map(({ name, dataDomain }) => ({ name, dataDomain }));
+    expect(domainTools).toEqual([
+      { name: "query_order_financials", dataDomain: "cost" },
+    ]);
   });
 
   it("persists role updates and deletes their references", async () => {

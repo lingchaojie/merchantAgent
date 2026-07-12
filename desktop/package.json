@@ -12,11 +12,15 @@
     "typecheck:web": "tsc -p tsconfig.web.json --noEmit",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "vitest run",
-    "dist:dir": "electron-vite build && electron-builder --dir",
-    "dist:win": "electron-vite build && electron-builder --win",
-    "dist": "electron-vite build && electron-builder"
+    "capability:generate": "node scripts/generate-reference-capability.mjs",
+    "rebuild:electron": "electron-rebuild -f -w better-sqlite3",
+    "dist:dir": "electron-vite build && npm run rebuild:electron && electron-builder --dir",
+    "dist:win": "electron-vite build && npm run rebuild:electron && electron-builder --win",
+    "dist": "electron-vite build && npm run rebuild:electron && electron-builder"
   },
   "devDependencies": {
+    "@electron/rebuild": "3.6.1",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22",
     "@types/react": "^18",
     "@types/react-dom": "^18",
@@ -29,6 +33,7 @@
     "vitest": "^2"
   },
   "dependencies": {
+    "better-sqlite3": "^12.11.1",
     "react": "^18",
     "react-dom": "^18"
   },
@@ -36,7 +41,18 @@
     "appId": "com.merchantagent.desktop",
     "productName": "merchantAgent",
     "files": ["out/**"],
+    "extraResources": [
+      {
+        "from": "resources/capabilities/reference-manufacturing.cap.json",
+        "to": "capabilities/reference-manufacturing.cap.json"
+      },
+      {
+        "from": "resources/capabilities/reference-public.pem",
+        "to": "capabilities/reference-public.pem"
+      }
+    ],
     "npmRebuild": false,
+    "asarUnpack": ["node_modules/better-sqlite3/**/*"],
     "win": { "target": ["nsis"] },
     "mac": { "target": ["dmg"] },
     "linux": { "target": ["AppImage"] }

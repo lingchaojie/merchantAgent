@@ -66,12 +66,12 @@ type tool
     define exposed_by: [skill]
     define invoker: usable_by from exposed_by
 
-# order: finest-grained data authz example for Phase 0.
-type order
+# Industry-neutral record authorization. ResourceKind is encoded into the object
+# id by the runtime (for example, <tenant>/<kind>/<record-id>).
+type business_record
   relations
     define tenant: [tenant]
     define owner_dept: [department]
     define owner: [user]
-    # visible to: the owner, members of the owning dept, or managers of the
-    # owning dept (incl. parent-dept managers via inheritance).
-    define viewer: owner or member from owner_dept or manager from owner_dept
+    define operator: [user, department#member]
+    define viewer: owner or operator or member from owner_dept or manager from owner_dept

@@ -5,6 +5,7 @@
 import { ipcMain, dialog } from "electron";
 import { Sandbox } from "./fsguard";
 import { client } from "./agentd";
+import type { LocalToolExecutor } from "./local-tools/executor";
 import {
   Channels,
   type ChatEvent,
@@ -14,7 +15,15 @@ import {
   type FsWriteReq,
   type AdminReq,
   type AdminResp,
+  type LocalToolRequest,
+  type LocalToolResponse,
 } from "../shared/contract";
+
+const DEFAULT_LOCAL_TOOL_CONFIRMATION_TIMEOUT_MS = 105_000;
+
+export interface IpcRegistrationOptions {
+  localToolConfirmationTimeoutMs?: number;
+}
 
 // handleFileRequest executes a backend file_request on the client via fsguard.
 // Reads are direct (path jail only); overwriting an existing file needs an
@@ -45,36 +54,105 @@ async function handleFileRequest(sandbox: Sandbox, ev: ChatEvent): Promise<{ con
   }
 }
 
-export function register(sandbox: Sandbox): void {
-  ipcMain.handle(Channels.login, (_e, req: LoginReq) => client.login(req.userId));
+async function handleLocalToolRequest(
+  executor: LocalToolExecutor,
+  request: LocalToolRequest,
+  confirmationTimeoutMs: number,
+): Promise<LocalToolResponse> {
+  const response = await executor.execute(request, async (preview) => {
+    const answer = dialog.showMessageBox({
+      type: "warning",
+      buttons: ["取消", "确认写入"],
+      defaultId: 0,
+      cancelId: 0,
+      message: "确认更新生产进度",
+      detail: [
+        `订单：${preview.orderId}`,
+        `工单：${preview.workOrderId}`,
+        `完成率：${preview.before.completionRate}% → ${preview.proposed.completionRate}%`,
+        `备注：${preview.proposed.note || "（无）"}`,
+      ].join("\n"),
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<boolean>((resolve) => {
+      timeout = setTimeout(() => resolve(false), confirmationTimeoutMs);
+    });
+    try {
+      return await Promise.race([
+        answer.then(({ response }) => response === 1, () => false),
+        expired,
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  });
+  return {
+    data: response.data ? { ...response.data } : undefined,
+    meta: {
+      ...response.meta,
+      before: response.meta.before ? { ...response.meta.before } : undefined,
+      after: response.meta.after ? { ...response.meta.after } : undefined,
+    },
+    error: response.error,
+  };
+}
 
-  // chat: proxy to agentd's SSE stream, forwarding each event to the renderer on
-  // a per-call channel; file_request events are executed locally via fsguard.
-  // The invoke resolves with the final answer text.
-  // SECURITY (demo): userId comes from the renderer. Production derives the
-  // principal from a WeCom-authenticated session, never the renderer.
-  ipcMain.handle(Channels.chat, (e, { streamId, req }: ChatIpcReq) => {
-    const chan = Channels.chatEventPrefix + streamId;
-    return client.chat(
-      req,
-      (ev) => {
-        if (!e.sender.isDestroyed()) e.sender.send(chan, ev);
-      },
-      (ev) => handleFileRequest(sandbox, ev),
+export function register(
+  sandbox: Sandbox,
+  localToolExecutor: LocalToolExecutor,
+  options: IpcRegistrationOptions = {},
+): () => void {
+  const installed: string[] = [];
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    for (const channel of installed.reverse()) ipcMain.removeHandler(channel);
+  };
+  const install: typeof ipcMain.handle = (channel, listener) => {
+    ipcMain.handle(channel, listener);
+    installed.push(channel);
+  };
+  const confirmationTimeoutMs =
+    options.localToolConfirmationTimeoutMs ?? DEFAULT_LOCAL_TOOL_CONFIRMATION_TIMEOUT_MS;
+
+  try {
+    install(Channels.login, (_e, req: LoginReq) => client.login(req.userId));
+
+    // chat: proxy to agentd's SSE stream, forwarding each event to the renderer on
+    // a per-call channel; file_request events are executed locally via fsguard.
+    // The invoke resolves with the final answer text.
+    // SECURITY (demo): userId comes from the renderer. Production derives the
+    // principal from a WeCom-authenticated session, never the renderer.
+    install(Channels.chat, (e, { streamId, req }: ChatIpcReq) => {
+      const chan = Channels.chatEventPrefix + streamId;
+      return client.chat(
+        req,
+        (ev) => {
+          if (!e.sender.isDestroyed()) e.sender.send(chan, ev);
+        },
+        (ev) => handleFileRequest(sandbox, ev),
+        (request) => handleLocalToolRequest(localToolExecutor, request, confirmationTimeoutMs),
+      );
+    });
+
+    // Local file ops — confined to the sandbox root (fsguard).
+    install(Channels.fsRead, (_e, req: FsReadReq) => sandbox.read(req.rel));
+    install(Channels.fsWrite, (_e, req: FsWriteReq) =>
+      sandbox.write(req.rel, req.contents, !!req.confirmed),
     );
-  });
 
-  // Local file ops — confined to the sandbox root (fsguard).
-  ipcMain.handle(Channels.fsRead, (_e, req: FsReadReq) => sandbox.read(req.rel));
-  ipcMain.handle(Channels.fsWrite, (_e, req: FsWriteReq) =>
-    sandbox.write(req.rel, req.contents, !!req.confirmed),
-  );
+    // admin: generic proxy to agentd's /admin/* API. X-User-Id is injected in
+    // agentd.adminRequest; the backend's requireAdmin gate authorizes. Errors are
+    // returned as a typed AdminResp (never thrown across the bridge).
+    install(Channels.admin, async (_e, req: AdminReq): Promise<AdminResp> => {
+      const r = await client.adminRequest(req);
+      return r.ok ? { ok: true, data: r.data } : { ok: false, status: r.status, error: r.error || "error" };
+    });
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 
-  // admin: generic proxy to agentd's /admin/* API. X-User-Id is injected in
-  // agentd.adminRequest; the backend's requireAdmin gate authorizes. Errors are
-  // returned as a typed AdminResp (never thrown across the bridge).
-  ipcMain.handle(Channels.admin, async (_e, req: AdminReq): Promise<AdminResp> => {
-    const r = await client.adminRequest(req);
-    return r.ok ? { ok: true, data: r.data } : { ok: false, status: r.status, error: r.error || "error" };
-  });
+  return cleanup;
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -38,6 +39,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		SessionID string `json:"sessionId"`
 		UserID    string `json:"userId"`
 		Question  string `json:"question"`
+		DeviceID  string `json:"deviceId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
@@ -70,7 +72,13 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Attach the reverse file bridge so local-file tools round-trip to this
 	// client over the SSE stream (design §2, M4b).
-	ctx := connector.WithFileBridge(r.Context(), &fileBridge{srv: s, send: send})
+	deviceID := req.DeviceID
+	if deviceID == "" {
+		deviceID = "unknown-device"
+	}
+	ctx := connector.WithDeviceID(r.Context(), deviceID)
+	ctx = connector.WithFileBridge(ctx, &fileBridge{srv: s, send: send})
+	ctx = connector.WithLocalToolBridge(ctx, &localToolBridge{srv: s, send: send})
 	final, updated, err := s.asm.Agent.Ask(ctx, p, history, req.Question, sink)
 	if err != nil {
 		send("error", map[string]string{"error": err.Error()})
@@ -83,17 +91,61 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAudit returns the hash-chained audit log for a tenant (?tenant=…,
-// defaults to the server's tenant) and whether it verifies.
+// defaults to the server's tenant) and whether it verifies. The desktop injects
+// X-User-Id from the current identity; production derives it from a session.
 func (s *server) handleAudit(w http.ResponseWriter, r *http.Request) {
-	tenant := r.URL.Query().Get("tenant")
-	if tenant == "" {
-		tenant = s.tenant
+	serveAudit(w, r, s.tenant, s.asm.Audit, s.asm.IDP, s.asm.Store)
+}
+
+type auditIdentityProvider interface {
+	Authenticate(context.Context, org.LoginContext) (org.Principal, error)
+}
+
+func serveAudit(w http.ResponseWriter, r *http.Request, tenant string, audit *runtime.TenantAudit, idp auditIdentityProvider, checker adminChecker) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
 	}
-	chain := s.asm.Audit.Chain(tenant)
+	uid := r.Header.Get("X-User-Id")
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing X-User-Id"})
+		return
+	}
+	principal, err := idp.Authenticate(r.Context(), org.LoginContext{Credential: uid})
+	if err != nil || principal.TenantID != tenant || principal.UserID != uid {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "tenant member only"})
+		return
+	}
+	requestedTenant := r.URL.Query().Get("tenant")
+	if requestedTenant != "" && requestedTenant != tenant {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-tenant audit access denied"})
+		return
+	}
+	isAdmin, err := checker.Check(r.Context(), "user:"+uid, "admin", "tenant:"+tenant)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	chain := audit.Chain(tenant)
+	entries := chain.Entries()
+	entriesScope := "tenant_chain"
+	if !isAdmin {
+		entriesScope = "caller"
+		own := make([]runtime.AuditEntry, 0, len(entries))
+		for _, entry := range entries {
+			if entry.UserID == uid {
+				own = append(own, entry)
+			}
+		}
+		entries = own
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tenant":   tenant,
-		"verified": chain.Verify(),
-		"entries":  chain.Entries(),
+		"tenant":            tenant,
+		"verified":          chain.Verify(),
+		"verificationScope": "full_tenant_chain_server",
+		"entriesScope":      entriesScope,
+		"entries":           entries,
 	})
 }
 
@@ -110,6 +162,30 @@ func (s *server) handleFileResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.resolveFile(req.ReqID, fileResult{content: req.Content, err: req.Error}) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown or expired reqId"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) handleLocalToolResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		ReqID string                  `json:"reqId"`
+		Data  map[string]any          `json:"data"`
+		Meta  connector.ExecutionMeta `json:"meta"`
+		Error string                  `json:"error"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+	response := connector.LocalToolResponse{Data: req.Data, Meta: req.Meta, Error: req.Error}
+	if !s.resolveLocalTool(req.ReqID, response) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown or expired reqId"})
 		return
 	}

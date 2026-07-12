@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"sort"
 )
 
 // adminChecker is the minimal authz surface requireAdmin needs (authz.Store fits).
@@ -37,16 +38,39 @@ func requireAdmin(chk adminChecker, tenant string, next http.HandlerFunc) http.H
 // editor's tool picker. Read-only; still admin-gated.
 func (s *server) handleTools(w http.ResponseWriter, r *http.Request) {
 	type toolInfo struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		DataDomain  string `json:"dataDomain,omitempty"`
+		Name                 string `json:"name"`
+		Description          string `json:"description"`
+		DataDomain           string `json:"dataDomain,omitempty"`
+		PackageID            string `json:"packageId"`
+		Version              string `json:"version"`
+		Execution            string `json:"execution"`
+		Risk                 string `json:"risk"`
+		RequiresConfirmation bool   `json:"requiresConfirmation"`
 	}
-	out := []toolInfo{}
+	byName := make(map[string]toolInfo)
 	for _, c := range s.asm.Conns {
 		for _, t := range c.Tools() {
-			sp := t.Spec()
-			out = append(out, toolInfo{Name: sp.Name, Description: sp.Description, DataDomain: sp.DataDomain})
+			sp := t.Spec().WithDefaults()
+			byName[sp.Name] = toolInfo{
+				Name:                 sp.Name,
+				Description:          sp.Description,
+				DataDomain:           sp.DataDomain,
+				PackageID:            sp.PackageID,
+				Version:              sp.Version,
+				Execution:            string(sp.Execution),
+				Risk:                 string(sp.Risk),
+				RequiresConfirmation: sp.RequiresConfirmation,
+			}
 		}
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]toolInfo, 0, len(names))
+	for _, name := range names {
+		out = append(out, byName[name])
 	}
 	writeJSON(w, http.StatusOK, out)
 }

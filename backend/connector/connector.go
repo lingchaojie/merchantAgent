@@ -7,29 +7,72 @@ package connector
 
 import "context"
 
+type ParamType string
+
+const (
+	ParamString  ParamType = "string"
+	ParamInteger ParamType = "integer"
+	ParamBoolean ParamType = "boolean"
+)
+
+type ExecutionLocation string
+
+const (
+	ExecutionServer  ExecutionLocation = "server"
+	ExecutionDesktop ExecutionLocation = "desktop"
+)
+
+type RiskLevel string
+
+const (
+	RiskRead      RiskLevel = "read"
+	RiskLowWrite  RiskLevel = "low_write"
+	RiskHighWrite RiskLevel = "high_write"
+)
+
 // ParamSpec describes one tool parameter (for schema + LLM/router use).
 type ParamSpec struct {
 	Name        string
 	Description string
+	Type        ParamType
 	Required    bool
 }
 
 // ToolSpec declares a tool AND its authorization footprint. The runtime guard
 // (runtime/guard.go) uses the authz fields to enforce research/11 §6.1:
-//   - ResourceType+ResourceArg → record-level data authz (can this user view the
-//     specific resource, e.g. order:<tenant>/<id>).
+//   - ResourceType+ResourceArg → record-level data authz. ResourceRelation is
+//     the required relation and defaults to viewer for existing read tools.
 //   - DataDomain → sensitivity authz (can this user view e.g. the cost domain).
 //
 // Empty authz fields mean "not applicable" (e.g. a tool touching no sensitive
 // domain leaves DataDomain empty).
 type ToolSpec struct {
-	Name        string
-	Description string
-	Params      []ParamSpec
+	PackageID            string
+	Version              string
+	ManifestDigest       string
+	Name                 string
+	Description          string
+	Params               []ParamSpec
+	ResourceType         string
+	ResourceKind         string
+	ResourceArg          string
+	ResourceRelation     string
+	DataDomain           string
+	Execution            ExecutionLocation
+	Risk                 RiskLevel
+	RequiresConfirmation bool
+	ResultFields         []string
+}
 
-	ResourceType string // object type the tool reads, e.g. "order" (optional)
-	ResourceArg  string // which arg holds the resource id, e.g. "orderId" (optional)
-	DataDomain   string // sensitive data domain touched, e.g. "cost" (optional)
+// WithDefaults returns a copy with legacy metadata defaults applied.
+func (s ToolSpec) WithDefaults() ToolSpec {
+	if s.Execution == "" {
+		s.Execution = ExecutionServer
+	}
+	if s.Risk == "" {
+		s.Risk = RiskRead
+	}
+	return s
 }
 
 // Tool is a single callable capability.

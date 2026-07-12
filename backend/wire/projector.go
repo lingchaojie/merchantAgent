@@ -87,17 +87,18 @@ func (p *Projector) Reproject(ctx context.Context) error {
 	return p.store.ApplyDiff(ctx, sync.Reconcile(current, desired))
 }
 
-// demoFixtures are the non-config-derived tuples the demo scenario needs: order
-// ownership (record-level data authz). Cost-domain viewers now come from the
+// demoFixtures are the non-config-derived tuples the demo scenario needs:
+// business-record ownership and operation. Cost-domain viewers now come from the
 // config domain_grants table, so they are NOT here (avoids double source).
 func demoFixtures(tenant string) []sync.Tuple {
 	o := func(s string) string { return tenant + "/" + s }
 	return []sync.Tuple{
-		{User: "user:u_sales1", Relation: "owner", Object: "order:" + o("SO-1001")},
-		{User: "department:" + o("d_sales"), Relation: "owner_dept", Object: "order:" + o("SO-1001")},
-		{User: "user:u_sales1", Relation: "owner", Object: "order:" + o("SO-1002")},
-		{User: "department:" + o("d_sales"), Relation: "owner_dept", Object: "order:" + o("SO-1002")},
-		{User: "department:" + o("d_sales"), Relation: "owner_dept", Object: "order:" + o("SO-1003")},
+		{User: "user:u_sales1", Relation: "owner", Object: "business_record:" + o("order/SO-1001")},
+		{User: "department:" + o("d_sales"), Relation: "owner_dept", Object: "business_record:" + o("order/SO-1001")},
+		{User: "department:" + o("d_prod") + "#member", Relation: "operator", Object: "business_record:" + o("order/SO-1001")},
+		{User: "user:u_sales1", Relation: "owner", Object: "business_record:" + o("order/SO-1002")},
+		{User: "department:" + o("d_sales"), Relation: "owner_dept", Object: "business_record:" + o("order/SO-1002")},
+		{User: "department:" + o("d_sales"), Relation: "owner_dept", Object: "business_record:" + o("order/SO-1003")},
 	}
 }
 
