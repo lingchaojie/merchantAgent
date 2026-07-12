@@ -225,6 +225,11 @@ function string(value: unknown, path: string): string {
   return value;
 }
 
+function credentialRef(value: unknown, path: string): string {
+  if (!isCredentialRef(value)) return fail(path, "must be an opaque credential ref");
+  return value;
+}
+
 function identifier(value: unknown, path: string): string {
   const parsed = string(value, path);
   if (!IDENTIFIER.test(parsed)) return fail(path, "is not a safe identifier");
@@ -385,7 +390,7 @@ function parseProfile(value: unknown, path: string): SQLServerProfile {
     ...(raw.caPath === undefined ? {} : { caPath: string(raw.caPath, `${path}.caPath`) }),
     connectTimeoutMS: integer(raw.connectTimeoutMS, `${path}.connectTimeoutMS`, 1_000, 30_000),
     queryTimeoutMS: integer(raw.queryTimeoutMS, `${path}.queryTimeoutMS`, 1_000, 10_000),
-    credentialRef: string(raw.credentialRef, `${path}.credentialRef`),
+    credentialRef: credentialRef(raw.credentialRef, `${path}.credentialRef`),
     environment: enumValue(raw.environment, `${path}.environment`, ["test", "preproduction"] as const),
   };
 }

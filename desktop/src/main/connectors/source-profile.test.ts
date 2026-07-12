@@ -72,6 +72,24 @@ describe("validateSQLServerProfile", () => {
   it("normalizes a malformed profile to invalid_argument", () => {
     expect(() => validateSQLServerProfile(null as never)).toThrowError("invalid_argument");
   });
+
+  it.each([
+    ["UNC", "\\\\server\\share\\ca.pem"],
+    ["extended namespace", "\\\\?\\C:\\certs\\ca.pem"],
+    ["device namespace", "\\\\.\\C:\\certs\\ca.pem"],
+    ["relative", "certs\\ca.pem"],
+    ["unsupported extension", "C:\\certs\\ca.txt"],
+  ])("rejects a %s CA path as tls_failed", (_name, caPath) => {
+    let error: unknown;
+    try {
+      validateSQLServerProfile({ ...fixtureProfile(), caPath });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("tls_failed");
+    expect((error as Error).message).not.toContain(caPath);
+  });
 });
 
 describe("toMSSQLConfig", () => {
@@ -106,10 +124,11 @@ describe("toMSSQLConfig", () => {
     expect(config.options).toMatchObject({ instanceName: "TESTSQL" });
   });
 
-  it("loads an explicit CA file into structured TLS options", () => {
+  it.each([".pem", ".crt", ".cer"])("loads a bounded local %s CA file into structured TLS options", (extension) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "connector-ca-"));
-    const caPath = path.join(directory, "ca.pem");
-    fs.writeFileSync(caPath, "TEST CA", "utf8");
+    const caPath = path.join(directory, `ca${extension}`);
+    const contents = Buffer.from("TEST CA", "utf8");
+    fs.writeFileSync(caPath, contents);
     try {
       const config = toMSSQLConfig(
         { ...fixtureProfile(), caPath },
@@ -117,8 +136,67 @@ describe("toMSSQLConfig", () => {
       );
 
       expect(config.options).toMatchObject({
-        cryptoCredentialsDetails: { ca: "TEST CA" },
+        cryptoCredentialsDetails: { ca: contents },
       });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an oversized CA file", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "oversized-connector-ca-"));
+    const caPath = path.join(directory, "ca.pem");
+    fs.writeFileSync(caPath, Buffer.alloc(256 * 1024 + 1, 65));
+    try {
+      expect(() =>
+        toMSSQLConfig(
+          { ...fixtureProfile(), caPath },
+          { username: "agent_test", password: "S3cret!" },
+        ),
+      ).toThrowError("tls_failed");
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an empty or non-regular CA path", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "invalid-connector-ca-"));
+    const emptyPath = path.join(directory, "empty.pem");
+    const directoryPath = path.join(directory, "directory.pem");
+    fs.writeFileSync(emptyPath, Buffer.alloc(0));
+    fs.mkdirSync(directoryPath);
+    try {
+      for (const caPath of [emptyPath, directoryPath]) {
+        expect(() =>
+          toMSSQLConfig(
+            { ...fixtureProfile(), caPath },
+            { username: "agent_test", password: "S3cret!" },
+          ),
+        ).toThrowError("tls_failed");
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a CA symlink when Windows permits creating one", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "symlink-connector-ca-"));
+    const targetPath = path.join(directory, "target.pem");
+    const symlinkPath = path.join(directory, "link.pem");
+    fs.writeFileSync(targetPath, "TEST CA", "utf8");
+    try {
+      try {
+        fs.symlinkSync(targetPath, symlinkPath, "file");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+        throw error;
+      }
+      expect(() =>
+        toMSSQLConfig(
+          { ...fixtureProfile(), caPath: symlinkPath },
+          { username: "agent_test", password: "S3cret!" },
+        ),
+      ).toThrowError("tls_failed");
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

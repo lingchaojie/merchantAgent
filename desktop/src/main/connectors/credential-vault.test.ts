@@ -131,7 +131,7 @@ describe("KeytarCredentialVault", () => {
       error = caught;
     }
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("missing_credentials");
+    expect((error as Error).message).toContain("invalid_credentials");
     expect((error as Error).message).not.toMatch(/keytar|native|S3cret/);
   });
 
@@ -144,5 +144,82 @@ describe("KeytarCredentialVault", () => {
 
     keytar.api.findCredentials = async () => [null, { account: 42 }] as never;
     await expect(vault.listRefs()).rejects.toThrowError("invalid_credentials");
+  });
+
+  it("normalizes malformed delete results and delete rejections", async () => {
+    const keytar = fakeKeytar();
+    const vault = new KeytarCredentialVault(keytar.api, "mock-corp-001", "device-01");
+
+    keytar.api.deletePassword = async () => "yes" as never;
+    await expect(vault.remove("erp-test")).rejects.toThrowError("invalid_credentials");
+
+    keytar.api.deletePassword = async () => {
+      throw new Error("delete native detail: S3cret!");
+    };
+    let error: unknown;
+    try {
+      await vault.remove("erp-test");
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("invalid_credentials");
+    expect((error as Error).message).not.toMatch(/delete|native|S3cret/);
+  });
+
+  it("normalizes malformed set results and set rejections", async () => {
+    const keytar = fakeKeytar();
+    const vault = new KeytarCredentialVault(keytar.api, "mock-corp-001", "device-01");
+    const credential = { username: "agent_test", password: "S3cret!" };
+
+    keytar.api.setPassword = async () => true as never;
+    await expect(vault.put("erp-test", credential)).rejects.toThrowError("invalid_credentials");
+
+    keytar.api.setPassword = async () => {
+      throw new Error("set native detail: S3cret!");
+    };
+    let error: unknown;
+    try {
+      await vault.put("erp-test", credential);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("invalid_credentials");
+    expect((error as Error).message).not.toMatch(/set|native|S3cret/);
+  });
+
+  it("requires complete plain findCredentials records and normalizes list rejections", async () => {
+    const malformedRecords: unknown[] = [
+      { account: "credential/erp-test" },
+      { account: "credential/erp-test", password: 42 },
+      { account: "credential/erp-test", password: "secret", extra: true },
+      Object.assign(Object.create({ inherited: true }) as object, {
+        account: "credential/erp-test",
+        password: "secret",
+      }),
+    ];
+
+    for (const record of malformedRecords) {
+      const keytar = fakeKeytar();
+      keytar.api.findCredentials = async () => [record] as never;
+      const vault = new KeytarCredentialVault(keytar.api, "mock-corp-001", "device-01");
+      await expect(vault.listRefs()).rejects.toThrowError("invalid_credentials");
+    }
+
+    const keytar = fakeKeytar();
+    keytar.api.findCredentials = async () => {
+      throw new Error("list native detail: S3cret!");
+    };
+    const vault = new KeytarCredentialVault(keytar.api, "mock-corp-001", "device-01");
+    let error: unknown;
+    try {
+      await vault.listRefs();
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("invalid_credentials");
+    expect((error as Error).message).not.toMatch(/list|native|S3cret/);
   });
 });

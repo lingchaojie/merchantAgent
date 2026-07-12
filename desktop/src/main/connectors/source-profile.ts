@@ -1,8 +1,12 @@
 import type { config as MSSQLConfig } from "mssql";
 import fs from "node:fs";
+import path from "node:path";
 
 import type { ServiceCredential } from "./credential-vault";
 import { ConnectorError, isCredentialRef, type SQLServerProfile } from "./schema";
+
+const MAX_CA_BYTES = 256 * 1024;
+const CERTIFICATE_EXTENSIONS = new Set([".pem", ".crt", ".cer"]);
 
 function fixedString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -10,6 +14,21 @@ function fixedString(value: unknown): value is string {
 
 function integerInRange(value: unknown, minimum: number, maximum: number): value is number {
   return Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum;
+}
+
+function tlsFailure(): ConnectorError {
+  return new ConnectorError("tls_failed", "SQL Server CA certificate is unavailable");
+}
+
+function requireLocalCertificatePath(caPath: string): void {
+  if (
+    process.platform !== "win32" ||
+    !/^[A-Za-z]:[\\/]/.test(caPath) ||
+    !path.win32.isAbsolute(caPath) ||
+    !CERTIFICATE_EXTENSIONS.has(path.win32.extname(caPath).toLowerCase())
+  ) {
+    throw tlsFailure();
+  }
 }
 
 export function validateSQLServerProfile(profile: SQLServerProfile): void {
@@ -43,8 +62,9 @@ export function validateSQLServerProfile(profile: SQLServerProfile): void {
   if (!isCredentialRef(profile.credentialRef)) {
     throw new ConnectorError("invalid_argument", "SQL Server credential ref is invalid");
   }
-  if (profile.caPath !== undefined && !fixedString(profile.caPath)) {
-    throw new ConnectorError("invalid_argument", "SQL Server CA path is invalid");
+  if (profile.caPath !== undefined) {
+    if (!fixedString(profile.caPath)) throw tlsFailure();
+    requireLocalCertificatePath(profile.caPath);
   }
 }
 
@@ -62,13 +82,17 @@ export function toMSSQLConfig(
   ) {
     throw new ConnectorError("invalid_credentials", "SQL Server service credential is invalid");
   }
-  let ca: string | undefined;
+  let ca: Buffer | undefined;
   if (profile.caPath !== undefined) {
     try {
-      ca = fs.readFileSync(profile.caPath, "utf8");
-      if (ca.length === 0) throw new Error("empty CA file");
+      const stat = fs.lstatSync(profile.caPath);
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 1 || stat.size > MAX_CA_BYTES) {
+        throw new Error("invalid CA file");
+      }
+      ca = fs.readFileSync(profile.caPath);
+      if (ca.length < 1 || ca.length > MAX_CA_BYTES) throw new Error("invalid CA file");
     } catch {
-      throw new ConnectorError("tls_failed", "SQL Server CA certificate is unavailable");
+      throw tlsFailure();
     }
   }
   return {

@@ -80,7 +80,7 @@ function locallyValidatedDraft(): ConnectorDraft {
         trustServerCertificate: false,
         connectTimeoutMS: 5_000,
         queryTimeoutMS: 10_000,
-        credentialRef: "credential://sql-orders",
+        credentialRef: "erp-credential",
         environment: "test",
       },
       operations: [
@@ -215,7 +215,7 @@ describe("ConnectorPackageStore", () => {
 
     expect(disk).not.toContain("SELECT");
     expect(disk).not.toContain("dbo.production_orders");
-    expect(disk).not.toContain("credential://sql-orders");
+    expect(disk).not.toContain("erp-credential");
     expect(disk).toContain('"encryptedPayload"');
     const packageACLPaths = fixture.protectedPaths.filter((protectedPath) =>
       protectedPath.includes(".ma-connector."),

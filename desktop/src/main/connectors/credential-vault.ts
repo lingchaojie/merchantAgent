@@ -22,6 +22,10 @@ export type KeytarAPI = Pick<
 const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const ACCOUNT_PREFIX = "credential/";
 
+function nativeFailure(): ConnectorError {
+  return new ConnectorError("invalid_credentials", "credential vault operation failed");
+}
+
 function requireScopeId(value: string): string {
   if (!SCOPE_ID.test(value)) {
     throw new ConnectorError("invalid_argument", "credential vault scope is invalid");
@@ -92,9 +96,10 @@ export class KeytarCredentialVault implements CredentialVault {
     const account = accountFor(ref);
     const credential = requireCredential(value);
     try {
-      await this.#api.setPassword(this.#service, account, JSON.stringify(credential));
+      const result = await this.#api.setPassword(this.#service, account, JSON.stringify(credential));
+      if (result !== undefined) throw new Error("invalid native result");
     } catch {
-      throw new ConnectorError("invalid_credentials", "service credential could not be stored");
+      throw nativeFailure();
     }
   }
 
@@ -104,7 +109,7 @@ export class KeytarCredentialVault implements CredentialVault {
     try {
       stored = await this.#api.getPassword(this.#service, account);
     } catch {
-      throw new ConnectorError("missing_credentials", "service credential is unavailable");
+      throw nativeFailure();
     }
     return stored === null ? null : decodeCredential(stored);
   }
@@ -112,31 +117,49 @@ export class KeytarCredentialVault implements CredentialVault {
   async remove(ref: string): Promise<boolean> {
     const account = accountFor(ref);
     try {
-      return await this.#api.deletePassword(this.#service, account);
+      const removed = await this.#api.deletePassword(this.#service, account);
+      if (typeof removed !== "boolean") throw new Error("invalid native result");
+      return removed;
     } catch {
-      throw new ConnectorError("invalid_credentials", "service credential could not be removed");
+      throw nativeFailure();
     }
   }
 
   async listRefs(): Promise<string[]> {
-    let stored: Awaited<ReturnType<KeytarAPI["findCredentials"]>>;
     try {
-      stored = await this.#api.findCredentials(this.#service);
-    } catch {
-      throw new ConnectorError("missing_credentials", "credential refs are unavailable");
-    }
-    if (!Array.isArray(stored)) {
-      throw new ConnectorError("invalid_credentials", "stored credential index is invalid");
-    }
-    const refs = new Set<string>();
-    for (const entry of stored) {
-      if (typeof entry !== "object" || entry === null || typeof entry.account !== "string") {
-        throw new ConnectorError("invalid_credentials", "stored credential index is invalid");
+      const stored = await this.#api.findCredentials(this.#service);
+      if (!Array.isArray(stored)) throw new Error("invalid native result");
+      const refs = new Set<string>();
+      for (const entry of stored) {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+          throw new Error("invalid native result");
+        }
+        if (Object.getPrototypeOf(entry) !== Object.prototype) {
+          throw new Error("invalid native result");
+        }
+        const keys = Object.keys(entry);
+        const account = Object.getOwnPropertyDescriptor(entry, "account");
+        const password = Object.getOwnPropertyDescriptor(entry, "password");
+        if (
+          keys.length !== 2 ||
+          !keys.includes("account") ||
+          !keys.includes("password") ||
+          account === undefined ||
+          password === undefined ||
+          !("value" in account) ||
+          !("value" in password) ||
+          typeof account.value !== "string" ||
+          typeof password.value !== "string"
+        ) {
+          throw new Error("invalid native result");
+        }
+        if (!account.value.startsWith(ACCOUNT_PREFIX)) continue;
+        const ref = account.value.slice(ACCOUNT_PREFIX.length);
+        if (isCredentialRef(ref)) refs.add(ref);
       }
-      if (!entry.account.startsWith(ACCOUNT_PREFIX)) continue;
-      const ref = entry.account.slice(ACCOUNT_PREFIX.length);
-      if (isCredentialRef(ref)) refs.add(ref);
+      return [...refs].sort();
+    } catch {
+      throw nativeFailure();
     }
-    return [...refs].sort();
   }
 }
