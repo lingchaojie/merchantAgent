@@ -97,6 +97,19 @@ func TestStoreRejectsInvalidPublicContracts(t *testing.T) {
 	}
 }
 
+func TestStoreRequiresDesktopExecution(t *testing.T) {
+	for _, execution := range []connector.ExecutionLocation{"", connector.ExecutionServer, "unknown"} {
+		t.Run(string(execution), func(t *testing.T) {
+			store := openTestStore(t)
+			v := validSubmittedVersion()
+			v.Contract.Tools[0].Execution = execution
+			if err := store.Submit(context.Background(), Submission{Version: v, ActorID: "impl-1"}); !errors.Is(err, ErrInvalidContract) {
+				t.Fatalf("execution=%q error=%v", execution, err)
+			}
+		})
+	}
+}
+
 func TestStoreUsesUnicodeCodePointsForStringBounds(t *testing.T) {
 	store := openTestStore(t)
 	v := validSubmittedVersion()
@@ -145,6 +158,42 @@ func TestStoreAppendsLifecycleEvents(t *testing.T) {
 	if i != len(want) {
 		t.Fatalf("event count=%d want=%d", i, len(want))
 	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE connector_lifecycle_events SET actor_id = 'tampered'`); err == nil {
+		t.Fatal("lifecycle event update succeeded")
+	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM connector_lifecycle_events`); err == nil {
+		t.Fatal("lifecycle event delete succeeded")
+	}
+}
+
+func TestStoreAdditionalLifecycleEdges(t *testing.T) {
+	t.Run("pending to revoked", func(t *testing.T) {
+		store := openTestStore(t)
+		v := validSubmittedVersion()
+		requireNoError(t, store.Submit(context.Background(), Submission{Version: v, ActorID: "impl-1"}))
+		requireNoError(t, store.Transition(context.Background(), Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: v.Digest, To: StatusRevoked, ActorID: "u_admin"}))
+	})
+	t.Run("suspended to revoked", func(t *testing.T) {
+		store := openTestStore(t)
+		v := validSubmittedVersion()
+		requireNoError(t, store.Submit(context.Background(), Submission{Version: v, ActorID: "impl-1"}))
+		requireNoError(t, store.Transition(context.Background(), Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: v.Digest, To: StatusPublished, ActorID: "u_admin"}))
+		requireNoError(t, store.Transition(context.Background(), Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: v.Digest, To: StatusSuspended, ActorID: "u_admin"}))
+		requireNoError(t, store.Transition(context.Background(), Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: v.Digest, To: StatusRevoked, ActorID: "u_admin"}))
+	})
+	t.Run("digest mismatch and not found", func(t *testing.T) {
+		store := openTestStore(t)
+		v := validSubmittedVersion()
+		requireNoError(t, store.Submit(context.Background(), Submission{Version: v, ActorID: "impl-1"}))
+		transition := Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: "sha256:" + string(bytes.Repeat([]byte("c"), 64)), To: StatusPublished, ActorID: "u_admin"}
+		if err := store.Transition(context.Background(), transition); !errors.Is(err, ErrDigestMismatch) {
+			t.Fatalf("digest mismatch error=%v", err)
+		}
+		transition.Version = "9.9.9"
+		if err := store.Transition(context.Background(), transition); !errors.Is(err, ErrVersionNotFound) {
+			t.Fatalf("not found error=%v", err)
+		}
+	})
 }
 
 func openTestStore(t *testing.T) *Store {
@@ -175,6 +224,7 @@ func validSubmittedVersion() Version {
 		Contract: PublicContract{Tools: []ToolContract{{
 			Name:             "query_order_status",
 			Description:      "Query the public status of an order",
+			Execution:        connector.ExecutionDesktop,
 			ResourceType:     "business_record",
 			ResourceKind:     "order",
 			ResourceArg:      "orderId",

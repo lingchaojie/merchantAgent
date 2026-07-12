@@ -12,6 +12,7 @@ import (
 
 var (
 	ErrInvalidVersion    = errors.New("invalid connector version")
+	ErrInvalidContract   = errors.New("invalid connector contract")
 	ErrImmutableVersion  = errors.New("connector version is immutable")
 	ErrIllegalTransition = errors.New("illegal connector lifecycle transition")
 	ErrVersionNotFound   = errors.New("connector version not found")
@@ -40,19 +41,20 @@ type ParamContract struct {
 }
 
 type ToolContract struct {
-	Name                 string              `json:"name"`
-	Description          string              `json:"description"`
-	ResourceType         string              `json:"resourceType"`
-	ResourceKind         string              `json:"resourceKind"`
-	ResourceArg          string              `json:"resourceArg"`
-	ResourceRelation     string              `json:"resourceRelation"`
-	DataDomain           string              `json:"dataDomain"`
-	Params               []ParamContract     `json:"params"`
-	ResultFields         []string            `json:"resultFields"`
-	Risk                 connector.RiskLevel `json:"risk"`
-	RequiresConfirmation bool                `json:"requiresConfirmation"`
-	TimeoutMS            int                 `json:"timeoutMS"`
-	MaxResults           int                 `json:"maxResults"`
+	Name                 string                      `json:"name"`
+	Description          string                      `json:"description"`
+	Execution            connector.ExecutionLocation `json:"execution"`
+	ResourceType         string                      `json:"resourceType"`
+	ResourceKind         string                      `json:"resourceKind"`
+	ResourceArg          string                      `json:"resourceArg"`
+	ResourceRelation     string                      `json:"resourceRelation"`
+	DataDomain           string                      `json:"dataDomain"`
+	Params               []ParamContract             `json:"params"`
+	ResultFields         []string                    `json:"resultFields"`
+	Risk                 connector.RiskLevel         `json:"risk"`
+	RequiresConfirmation bool                        `json:"requiresConfirmation"`
+	TimeoutMS            int                         `json:"timeoutMS"`
+	MaxResults           int                         `json:"maxResults"`
 }
 
 type PublicContract struct {

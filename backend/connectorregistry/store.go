@@ -274,6 +274,9 @@ func validateSubmission(v Version, actor string) error {
 	toolNames := make(map[string]struct{}, len(v.Contract.Tools))
 	for i, tool := range v.Contract.Tools {
 		if err := validateToolContract(tool, toolNames); err != nil {
+			if errors.Is(err, ErrInvalidContract) {
+				return fmt.Errorf("%w: tool %d: %v", ErrInvalidContract, i, err)
+			}
 			return invalidVersion("tool %d: %v", i, err)
 		}
 	}
@@ -281,6 +284,9 @@ func validateSubmission(v Version, actor string) error {
 }
 
 func validateToolContract(tool ToolContract, toolNames map[string]struct{}) error {
+	if tool.Execution != connector.ExecutionDesktop {
+		return fmt.Errorf("%w: execution must be %q", ErrInvalidContract, connector.ExecutionDesktop)
+	}
 	if tool.Name == "" || tool.Description == "" {
 		return errors.New("name and description are required")
 	}
