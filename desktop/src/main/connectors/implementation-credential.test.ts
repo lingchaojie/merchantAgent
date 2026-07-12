@@ -166,7 +166,10 @@ describe("DeviceIdentityStore", () => {
     expect(enrollment.fingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(disk).toContain('"encryptedPrivateKey"');
     expect(disk).not.toContain("BEGIN PRIVATE KEY");
-    expect(aclPaths).toEqual([store.identityPath]);
+    expect(aclPaths).toHaveLength(1);
+    expect(path.dirname(aclPaths[0])).toBe(path.dirname(store.identityPath));
+    expect(aclPaths[0]).toMatch(/device-identity\.json\.\d+\.[a-f0-9-]+\.tmp$/);
+    expect(fs.existsSync(aclPaths[0])).toBe(false);
     expect(store.loadOrCreate()).toEqual(enrollment);
   });
 
@@ -198,5 +201,76 @@ describe("DeviceIdentityStore", () => {
 
     expect(() => store.loadOrCreate()).toThrowError("acl failed");
     expect(fs.existsSync(store.identityPath)).toBe(false);
+  });
+
+  it("publishes without replacement and loads the identity that wins a creation race", () => {
+    const directory = temporaryDirectory();
+    const safeStorage = fakeSafeStorage();
+    const winnerStore = new DeviceIdentityStore(
+      directory,
+      safeStorage,
+      { protect: () => undefined },
+      () => "winning-device",
+    );
+    let winner: ReturnType<DeviceIdentityStore["loadOrCreate"]> | undefined;
+    let loserStore: DeviceIdentityStore;
+    const aclPaths: string[] = [];
+    loserStore = new DeviceIdentityStore(
+      directory,
+      safeStorage,
+      {
+        protect: (filePath) => {
+          aclPaths.push(filePath);
+          if (winner === undefined) {
+            if (fs.existsSync(loserStore.identityPath)) fs.rmSync(loserStore.identityPath);
+            winner = winnerStore.loadOrCreate();
+          }
+        },
+      },
+      () => "losing-device",
+    );
+
+    const loaded = loserStore.loadOrCreate();
+
+    expect(loaded).toEqual(winner);
+    expect(loaded.deviceId).toBe("winning-device");
+    expect(aclPaths).toHaveLength(1);
+    expect(aclPaths[0]).not.toBe(loserStore.identityPath);
+    expect(new DeviceIdentityStore(directory, safeStorage, { protect: () => undefined }).loadOrCreate()).toEqual(
+      winner,
+    );
+  });
+
+  it("preserves a concurrent winning identity when loser ACL protection fails", () => {
+    const directory = temporaryDirectory();
+    const safeStorage = fakeSafeStorage();
+    const winnerStore = new DeviceIdentityStore(
+      directory,
+      safeStorage,
+      { protect: () => undefined },
+      () => "winning-device",
+    );
+    let winner: ReturnType<DeviceIdentityStore["loadOrCreate"]> | undefined;
+    let loserStore: DeviceIdentityStore;
+    loserStore = new DeviceIdentityStore(
+      directory,
+      safeStorage,
+      {
+        protect: () => {
+          if (winner === undefined) {
+            if (fs.existsSync(loserStore.identityPath)) fs.rmSync(loserStore.identityPath);
+            winner = winnerStore.loadOrCreate();
+          }
+          throw new Error("acl failed");
+        },
+      },
+      () => "losing-device",
+    );
+
+    expect(() => loserStore.loadOrCreate()).toThrowError("acl failed");
+    expect(fs.existsSync(loserStore.identityPath)).toBe(true);
+    expect(new DeviceIdentityStore(directory, safeStorage, { protect: () => undefined }).loadOrCreate()).toEqual(
+      winner,
+    );
   });
 });

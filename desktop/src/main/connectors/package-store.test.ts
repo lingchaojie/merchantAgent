@@ -12,6 +12,7 @@ import {
   type SafeStorageLike,
 } from "./device-identity";
 import {
+  ConnectorPackageReader,
   ConnectorPackageStore,
   submissionSigningInput,
   type InstalledConnector,
@@ -141,7 +142,13 @@ function fixtureStore(): {
   const protectedPaths: string[] = [];
   const acl: ACLProtector = { protect: (filePath) => protectedPaths.push(filePath) };
   const platform = generateKeyPairSync("ed25519");
-  const identityStore = new DeviceIdentityStore(userData, safeStorage, acl, () => "device-01");
+  const identityStore = new DeviceIdentityStore(
+    userData,
+    safeStorage,
+    acl,
+    () => "device-01",
+    () => NOW,
+  );
   const enrollment = identityStore.loadOrCreate();
   const credential = signedCredential(platform.privateKey, enrollment.devicePublicKeyPem);
   const identity = identityStore.bindImplementationCredential(
@@ -210,7 +217,9 @@ describe("ConnectorPackageStore", () => {
     expect(disk).not.toContain("dbo.production_orders");
     expect(disk).not.toContain("credential://sql-orders");
     expect(disk).toContain('"encryptedPayload"');
-    const packageACLPaths = fixture.protectedPaths.filter((protectedPath) => protectedPath !== fixture.identityStore.identityPath);
+    const packageACLPaths = fixture.protectedPaths.filter((protectedPath) =>
+      protectedPath.includes(".ma-connector."),
+    );
     expect(packageACLPaths).toHaveLength(1);
     expect(path.dirname(packageACLPaths[0])).toBe(path.dirname(installed.path));
     expect(packageACLPaths[0]).toMatch(/\.ma-connector\.\d+\.[a-f0-9-]+\.tmp$/);
@@ -331,6 +340,129 @@ describe("ConnectorPackageStore", () => {
     const installed = fixture.store.install(locallyValidatedDraft(), NOW);
 
     expect(fixture.store.loadApproved(installed.ref, installed.manifest.digest).payload.connectorId).toBe(
+      "sql-orders",
+    );
+  });
+
+  it("reopens an approved package after expiry without restoring signing authority", () => {
+    const fixture = fixtureStore();
+    const installed = fixture.store.install(locallyValidatedDraft(), NOW);
+    const platformPublicKeyPem = fixture.platform.publicKey
+      .export({ type: "spki", format: "pem" })
+      .toString();
+    const restartedIdentityStore = new DeviceIdentityStore(
+      fixture.userData,
+      fixture.safeStorage,
+      { protect: () => undefined },
+      () => "must-not-create-another-device",
+    );
+    const afterExpiry = new Date("2026-07-12T11:00:00Z");
+
+    expect(() =>
+      restartedIdentityStore.bindImplementationCredential(
+        fixture.identity.implementationCredential,
+        platformPublicKeyPem,
+        afterExpiry,
+      ),
+    ).toThrowError("implementation_credential_expired");
+
+    const archivalIdentity = restartedIdentityStore.loadPackageReaderIdentity(
+      "mock-corp-001",
+      platformPublicKeyPem,
+    );
+    const reader = new ConnectorPackageReader(
+      fixture.userData,
+      fixture.safeStorage,
+      archivalIdentity,
+      { protect: () => undefined },
+    );
+
+    expect("sign" in archivalIdentity).toBe(false);
+    expect("install" in reader).toBe(false);
+    expect(Object.getOwnPropertyNames(reader)).not.toContain("core");
+    expect((reader as unknown as { core?: unknown }).core).toBeUndefined();
+    expect(reader.loadApproved(installed.ref, installed.manifest.digest).payload).toEqual(
+      locallyValidatedDraft().payload,
+    );
+  });
+
+  it("rejects direct signing after a retained identity reaches exclusive expiry", () => {
+    const userData = temporaryDirectory();
+    const safeStorage = fakeSafeStorage();
+    const platform = generateKeyPairSync("ed25519");
+    let currentTime = NOW;
+    const identityStore = new DeviceIdentityStore(
+      userData,
+      safeStorage,
+      { protect: () => undefined },
+      () => "device-01",
+      () => currentTime,
+    );
+    const enrollment = identityStore.loadOrCreate();
+    const identity = identityStore.bindImplementationCredential(
+      signedCredential(platform.privateKey, enrollment.devicePublicKeyPem),
+      platform.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      currentTime,
+    );
+
+    currentTime = new Date("2026-07-12T11:00:00Z");
+
+    expect(() => identity.sign("retained signing attempt")).toThrowError(
+      "implementation_credential_expired",
+    );
+  });
+
+  it("cannot backdate installation with a retained expired signing identity", () => {
+    const userData = temporaryDirectory();
+    const safeStorage = fakeSafeStorage();
+    const acl = { protect: () => undefined };
+    const platform = generateKeyPairSync("ed25519");
+    let currentTime = NOW;
+    const identityStore = new DeviceIdentityStore(
+      userData,
+      safeStorage,
+      acl,
+      () => "device-01",
+      () => currentTime,
+    );
+    const enrollment = identityStore.loadOrCreate();
+    const identity = identityStore.bindImplementationCredential(
+      signedCredential(platform.privateKey, enrollment.devicePublicKeyPem),
+      platform.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      currentTime,
+    );
+    const store = new ConnectorPackageStore(userData, safeStorage, identity, acl);
+    currentTime = new Date("2026-07-12T11:00:00Z");
+
+    expect(() => store.install(locallyValidatedDraft(), NOW)).toThrowError("package_integrity");
+    expect(fs.existsSync(path.join(userData, "connectors", "sql-orders", "1.0.0.ma-connector"))).toBe(false);
+  });
+
+  it("cannot retry an existing package install with a retained expired signing identity", () => {
+    const userData = temporaryDirectory();
+    const safeStorage = fakeSafeStorage();
+    const acl = { protect: () => undefined };
+    const platform = generateKeyPairSync("ed25519");
+    let currentTime = NOW;
+    const identityStore = new DeviceIdentityStore(
+      userData,
+      safeStorage,
+      acl,
+      () => "device-01",
+      () => currentTime,
+    );
+    const enrollment = identityStore.loadOrCreate();
+    const identity = identityStore.bindImplementationCredential(
+      signedCredential(platform.privateKey, enrollment.devicePublicKeyPem),
+      platform.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      currentTime,
+    );
+    const store = new ConnectorPackageStore(userData, safeStorage, identity, acl);
+    const installed = store.install(locallyValidatedDraft(), NOW);
+    currentTime = new Date("2026-07-12T11:00:00Z");
+
+    expect(() => store.install(locallyValidatedDraft(), NOW)).toThrowError("package_integrity");
+    expect(store.loadApproved(installed.ref, installed.manifest.digest).payload.connectorId).toBe(
       "sql-orders",
     );
   });

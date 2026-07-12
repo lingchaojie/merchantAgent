@@ -34,10 +34,15 @@ export interface DeviceEnrollment {
   fingerprint: string;
 }
 
-export interface ConnectorSigningIdentity extends DeviceEnrollment {
+export interface ConnectorPackageReadIdentity extends DeviceEnrollment {
+  tenantId: string;
+  platformPublicKeyPem: string;
+}
+
+export interface ConnectorSigningIdentity extends ConnectorPackageReadIdentity {
   implementationCredential: string;
   verifiedCredential: VerifiedImplementationCredential;
-  platformPublicKeyPem: string;
+  assertCurrentAuthorization(): VerifiedImplementationCredential;
   sign(input: string): string;
 }
 
@@ -102,6 +107,7 @@ export class DeviceIdentityStore {
     private readonly safeStorage: SafeStorageLike,
     private readonly aclProtector: ACLProtector = defaultACLProtector(),
     private readonly createDeviceId: () => string = randomUUID,
+    private readonly currentTime: () => Date = () => new Date(),
   ) {
     this.identityPath = path.join(userDataPath, "connectors", "device-identity.json");
   }
@@ -118,7 +124,8 @@ export class DeviceIdentityStore {
       devicePublicKeyPem,
       encryptedPrivateKey: this.safeStorage.encryptString(privateKeyPem).toString("base64"),
     };
-    this.atomicWrite(`${JSON.stringify(stored, null, 2)}\n`);
+    const created = this.atomicWrite(`${JSON.stringify(stored, null, 2)}\n`);
+    if (!created) return this.load().enrollment;
     return this.enrollment(stored.deviceId, publicKey, devicePublicKeyPem);
   }
 
@@ -140,12 +147,38 @@ export class DeviceIdentityStore {
         "credential is not bound to this device identity",
       );
     }
+    const assertCurrentAuthorization = (): VerifiedImplementationCredential =>
+      verifyImplementationCredential(
+        implementationCredential,
+        platformPublicKeyPem,
+        this.currentTime(),
+      );
     return {
       ...identity.enrollment,
+      tenantId: verifiedCredential.tenantId,
       implementationCredential,
       verifiedCredential,
       platformPublicKeyPem,
-      sign: (input: string) => sign(null, Buffer.from(input, "utf8"), identity.privateKey).toString("base64url"),
+      assertCurrentAuthorization,
+      sign: (input: string) => {
+        assertCurrentAuthorization();
+        return sign(null, Buffer.from(input, "utf8"), identity.privateKey).toString("base64url");
+      },
+    };
+  }
+
+  loadPackageReaderIdentity(
+    tenantId: string,
+    platformPublicKeyPem: string,
+  ): ConnectorPackageReadIdentity {
+    if (typeof tenantId !== "string" || tenantId.length === 0) {
+      throw new Error("device_identity_integrity: tenant is required");
+    }
+    parseEd25519PublicKeyPem(platformPublicKeyPem);
+    return {
+      ...this.load().enrollment,
+      tenantId,
+      platformPublicKeyPem,
     };
   }
 
@@ -208,19 +241,27 @@ export class DeviceIdentityStore {
     };
   }
 
-  private atomicWrite(contents: string): void {
+  private atomicWrite(contents: string): boolean {
     fs.mkdirSync(path.dirname(this.identityPath), { recursive: true });
     const temporaryPath = `${this.identityPath}.${process.pid}.${randomUUID()}.tmp`;
-    let installed = false;
     try {
-      fs.writeFileSync(temporaryPath, contents, { encoding: "utf8", mode: 0o600, flag: "wx" });
-      fs.renameSync(temporaryPath, this.identityPath);
-      installed = true;
-      this.aclProtector.protect(this.identityPath);
-    } catch (error) {
+      const descriptor = fs.openSync(temporaryPath, "wx", 0o600);
+      try {
+        fs.writeFileSync(descriptor, contents, { encoding: "utf8" });
+        fs.fsyncSync(descriptor);
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      this.aclProtector.protect(temporaryPath);
+      try {
+        fs.linkSync(temporaryPath, this.identityPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+        throw error;
+      }
+      return true;
+    } finally {
       fs.rmSync(temporaryPath, { force: true });
-      if (installed) fs.rmSync(this.identityPath, { force: true });
-      throw error;
     }
   }
 }

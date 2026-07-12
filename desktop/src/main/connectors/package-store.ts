@@ -6,6 +6,7 @@ import { canonicalJSONStringify } from "./canonical";
 import {
   defaultACLProtector,
   type ACLProtector,
+  type ConnectorPackageReadIdentity,
   type ConnectorSigningIdentity,
   type SafeStorageLike,
 } from "./device-identity";
@@ -120,19 +121,25 @@ export function submissionSigningInput(
   ].join("\n");
 }
 
-export class ConnectorPackageStore {
+class ConnectorPackageCore {
   private readonly connectorsDirectory: string;
 
   constructor(
     userDataPath: string,
     private readonly safeStorage: SafeStorageLike,
-    private readonly identity: ConnectorSigningIdentity,
+    private readonly identity: ConnectorPackageReadIdentity,
     private readonly aclProtector: ACLProtector = defaultACLProtector(),
   ) {
     this.connectorsDirectory = path.join(userDataPath, "connectors");
   }
 
   install(draftInput: ConnectorDraft, signedAtInput: Date = new Date()): InstalledConnector {
+    const signingIdentity = this.requireSigningIdentity();
+    try {
+      signingIdentity.assertCurrentAuthorization();
+    } catch {
+      return packageIntegrity("implementation credential is not currently authorized to install");
+    }
     this.requireEncryption();
     let draft: ConnectorDraft;
     try {
@@ -147,21 +154,21 @@ export class ConnectorPackageStore {
     let credential;
     try {
       credential = verifyImplementationCredential(
-        this.identity.implementationCredential,
-        this.identity.platformPublicKeyPem,
+        signingIdentity.implementationCredential,
+        signingIdentity.platformPublicKeyPem,
         signedAtInput,
       );
     } catch {
       return packageIntegrity("implementation credential is invalid at signing time");
     }
     if (
-      credential.credentialId !== this.identity.verifiedCredential.credentialId ||
+      credential.credentialId !== signingIdentity.verifiedCredential.credentialId ||
       credential.tenantId !== draft.tenantId ||
       credential.deviceId !== draft.deviceId ||
-      credential.deviceId !== this.identity.deviceId ||
+      credential.deviceId !== signingIdentity.deviceId ||
       !parseEd25519PublicKeyPem(credential.devicePublicKeyPem)
         .export({ type: "spki", format: "der" })
-        .equals(parseEd25519PublicKeyPem(this.identity.devicePublicKeyPem).export({ type: "spki", format: "der" }))
+        .equals(parseEd25519PublicKeyPem(signingIdentity.devicePublicKeyPem).export({ type: "spki", format: "der" }))
     ) {
       return packageIntegrity("draft, credential, and device identity are not bound");
     }
@@ -190,20 +197,25 @@ export class ConnectorPackageStore {
       const existing = this.loadApproved(ref, digest);
       return { ref, path: packagePath, manifest: existing.manifest };
     }
-    const implementationSignature = this.identity.sign(
-      submissionSigningInput(
-        credential.tenantId,
-        credential.deviceId,
-        manifest.connectorId,
-        manifest.version,
-        manifest.digest,
-        manifest.signedAt,
-      ),
-    );
+    let implementationSignature: string;
+    try {
+      implementationSignature = signingIdentity.sign(
+        submissionSigningInput(
+          credential.tenantId,
+          credential.deviceId,
+          manifest.connectorId,
+          manifest.version,
+          manifest.digest,
+          manifest.signedAt,
+        ),
+      );
+    } catch {
+      return packageIntegrity("implementation credential is not currently authorized to sign");
+    }
     const envelope: InstalledConnectorEnvelope = {
       manifest,
       encryptedPayload: this.safeStorage.encryptString(canonicalPayload).toString("base64"),
-      implementationCredential: this.identity.implementationCredential,
+      implementationCredential: signingIdentity.implementationCredential,
       implementationSignature,
     };
     const created = this.atomicWrite(packagePath, `${JSON.stringify(envelope, null, 2)}\n`);
@@ -248,7 +260,7 @@ export class ConnectorPackageStore {
       credential.credentialId !== envelope.manifest.credentialId ||
       credential.deviceId !== envelope.manifest.deviceId ||
       credential.deviceId !== this.identity.deviceId ||
-      credential.tenantId !== this.identity.verifiedCredential.tenantId
+      credential.tenantId !== this.identity.tenantId
     ) {
       return packageIntegrity("manifest is not bound to the implementation credential and local device");
     }
@@ -310,6 +322,19 @@ export class ConnectorPackageStore {
     return { ref, path: packagePath, manifest: envelope.manifest, payload };
   }
 
+  private requireSigningIdentity(): ConnectorSigningIdentity {
+    const candidate = this.identity as Partial<ConnectorSigningIdentity>;
+    if (
+      typeof candidate.sign !== "function" ||
+      typeof candidate.assertCurrentAuthorization !== "function" ||
+      typeof candidate.implementationCredential !== "string" ||
+      candidate.verifiedCredential === undefined
+    ) {
+      return packageIntegrity("a current signing identity is required to install packages");
+    }
+    return candidate as ConnectorSigningIdentity;
+  }
+
   private requireEncryption(): void {
     if (!this.safeStorage.isEncryptionAvailable()) return packageIntegrity("safeStorage encryption is unavailable");
   }
@@ -335,5 +360,33 @@ export class ConnectorPackageStore {
     } finally {
       fs.rmSync(temporaryPath, { force: true });
     }
+  }
+}
+
+export class ConnectorPackageReader {
+  readonly #core: ConnectorPackageCore;
+
+  constructor(
+    userDataPath: string,
+    safeStorage: SafeStorageLike,
+    identity: ConnectorPackageReadIdentity,
+    aclProtector: ACLProtector = defaultACLProtector(),
+  ) {
+    this.#core = new ConnectorPackageCore(userDataPath, safeStorage, identity, aclProtector);
+  }
+
+  loadApproved(ref: InstalledConnectorRef, approvedDigest: string): LoadedApprovedConnector {
+    return this.#core.loadApproved(ref, approvedDigest);
+  }
+}
+
+export class ConnectorPackageStore extends ConnectorPackageCore {
+  constructor(
+    userDataPath: string,
+    safeStorage: SafeStorageLike,
+    identity: ConnectorSigningIdentity,
+    aclProtector: ACLProtector = defaultACLProtector(),
+  ) {
+    super(userDataPath, safeStorage, identity, aclProtector);
   }
 }
