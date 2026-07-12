@@ -21,6 +21,46 @@ export interface ToolInfo {
   risk: "read" | "low_write" | "high_write";
   requiresConfirmation: boolean;
 }
+export interface PublicToolParameter {
+  name: string;
+  description: string;
+  type: "string" | "integer" | "boolean";
+  required: boolean;
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  enum?: Array<string | number | boolean>;
+}
+export interface PublicToolContract {
+  name: string;
+  description: string;
+  execution: "server" | "desktop";
+  resourceType: string;
+  resourceKind: string;
+  resourceArg: string;
+  resourceRelation: "viewer" | "operator";
+  dataDomain: string;
+  params: PublicToolParameter[];
+  resultFields: string[];
+  risk: "read" | "low_write" | "high_write";
+  requiresConfirmation: boolean;
+  timeoutMS: number;
+  maxResults: number;
+}
+export interface ConnectorVersionView {
+  tenantId: string;
+  connectorId: string;
+  version: string;
+  digest: string;
+  adapter: "sqlserver";
+  environment: "test" | "preproduction";
+  status: "pending_admin_approval" | "published" | "suspended" | "revoked";
+  checks: { checkerVersion: string; rulesetVersion: string; testsDigest: string };
+  contract: { tools: PublicToolContract[] };
+  submittedBy: string;
+  approvedBy?: string;
+}
 export interface Template {
   templateId: string; name: string; description: string;
   playbookMd: string; allowedTools: string[]; dataDomains: string[];
@@ -37,6 +77,13 @@ export function makeAdminClient(admin: AdminFn, userId: string) {
   }
   return {
     listTools: () => call<ToolInfo[]>("GET", "/admin/tools"),
+    listConnectors: () => call<ConnectorVersionView[]>("GET", "/admin/connectors"),
+    publishConnector: (id: string, version: string) =>
+      call<void>("POST", `/admin/connectors/${id}/versions/${version}/publish`),
+    suspendConnector: (id: string, version: string) =>
+      call<void>("POST", `/admin/connectors/${id}/versions/${version}/suspend`),
+    revokeConnector: (id: string, version: string) =>
+      call<void>("POST", `/admin/connectors/${id}/versions/${version}/revoke`),
     listRoles: () => call<Role[]>("GET", "/admin/roles"),
     createRole: (r: Role) => call<void>("POST", "/admin/roles", r),
     updateRole: (id: string, label: string, description: string) =>

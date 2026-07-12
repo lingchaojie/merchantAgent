@@ -5,17 +5,20 @@ import { RulesPane } from "./RulesPane";
 import { SkillsPane } from "./SkillsPane";
 import { AssignPane } from "./AssignPane";
 import { DomainsPane } from "./DomainsPane";
+import { ConnectorsPane } from "./ConnectorsPane";
 
-type Tab = "roles" | "rules" | "skills" | "assign" | "domains";
+type Tab = "connectors" | "roles" | "rules" | "skills" | "assign" | "domains";
 const TABS: { id: Tab; label: string }[] = [
+  { id: "connectors", label: "连接器" },
   { id: "roles", label: "角色" }, { id: "rules", label: "职位映射" },
   { id: "skills", label: "技能" }, { id: "assign", label: "分配" },
   { id: "domains", label: "数据域" },
 ];
 
 export function AdminView({ client, tenantId }: { client: AdminClient; tenantId: string }): JSX.Element {
-  const [tab, setTab] = useState<Tab>("roles");
+  const [tab, setTab] = useState<Tab>("connectors");
   const [denied, setDenied] = useState(false);
+  const [toolRevision, setToolRevision] = useState(0);
 
   useEffect(() => {
     client.listRoles().then(() => setDenied(false)).catch((e) =>
@@ -35,9 +38,10 @@ export function AdminView({ client, tenantId }: { client: AdminClient; tenantId:
         ))}
       </nav>
       <div className="admin-body">
+        {tab === "connectors" && <ConnectorsPane client={client} onLifecycle={() => setToolRevision((value) => value + 1)} />}
         {tab === "roles" && <RolesPane client={client} />}
         {tab === "rules" && <RulesPane client={client} />}
-        {tab === "skills" && <SkillsPane client={client} tenantId={tenantId} />}
+        {tab === "skills" && <SkillsPane client={client} tenantId={tenantId} refreshToken={toolRevision} />}
         {tab === "assign" && <AssignPane client={client} tenantId={tenantId} />}
         {tab === "domains" && <DomainsPane client={client} tenantId={tenantId} />}
       </div>

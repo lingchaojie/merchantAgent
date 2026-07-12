@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 import type { Skill, ToolInfo } from "../../admin";
-import { SkillEditor } from "./SkillsPane";
+import { SkillEditor, unavailableToolReferences } from "./SkillsPane";
 
 const css = readFileSync(new URL("../../app.css", import.meta.url), "utf8");
 
@@ -113,4 +113,46 @@ it("tool checkbox changes only allowedTools", () => {
 it("keeps checkbox rows as inline flex inside the admin pane", () => {
   expect(css).toMatch(/\.pane\s+\.chk\s*\{[^}]*display:\s*inline-flex;/s);
   expect(css).toMatch(/\.pane\s+\.tool-choice\s*\{[^}]*align-items:\s*flex-start;/s);
+});
+
+it("preserves historical unavailable tools but rejects newly added unavailable references", () => {
+  expect(unavailableToolReferences(["legacy_tool"], [], [])).toEqual(["legacy_tool"]);
+  expect(unavailableToolReferences(["legacy_tool"], ["legacy_tool"], [])).toEqual([]);
+  expect(unavailableToolReferences(["legacy_tool", "missing_tool"], ["legacy_tool"], []))
+    .toEqual(["missing_tool"]);
+
+  const html = renderToStaticMarkup(
+    <SkillEditor
+      skill={{ ...skillDraft(), allowedTools: ["legacy_tool"] }}
+      originalAllowedTools={["legacy_tool"]}
+      isNew={false}
+      busy={false}
+      tools={[]}
+      roles={[]}
+      domains={[]}
+      onChange={vi.fn()}
+      onSave={vi.fn()}
+      onCancel={vi.fn()}
+    />,
+  );
+  expect(html).toContain("legacy_tool");
+  expect(html).toContain("不可用");
+});
+
+it("does not allow a removed historical tool to be selected again", () => {
+  const html = renderToStaticMarkup(
+    <SkillEditor
+      skill={{ ...skillDraft(), allowedTools: [] }}
+      originalAllowedTools={["legacy_tool"]}
+      isNew={false}
+      busy={false}
+      tools={[]}
+      roles={[]}
+      domains={[]}
+      onChange={vi.fn()}
+      onSave={vi.fn()}
+      onCancel={vi.fn()}
+    />,
+  );
+  expect(html).toMatch(/unavailable-tool[^>]*>\s*<input type="checkbox" disabled/);
 });

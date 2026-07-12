@@ -19,4 +19,10 @@ describe("mobile shell CSS", () => {
   it("allows long admin subjects to wrap", () => {
     expect(mobile).toMatch(/\.pane-row code\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
   });
+
+  it("keeps connector contracts and top-bar actions inside narrow windows", () => {
+    expect(mobile).toMatch(/\.connectors-pane\s*\{[^}]*max-width:\s*100%;/s);
+    expect(mobile).toMatch(/\.connector-meta\s*\{[^}]*grid-template-columns:\s*1fr;/s);
+    expect(mobile).toMatch(/\.topbar-right\s*\{[^}]*min-width:\s*0;/s);
+  });
 });

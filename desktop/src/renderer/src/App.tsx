@@ -129,6 +129,7 @@ export function App(): JSX.Element {
           onCommand={() => setPaletteOpen(true)}
           view={view}
           canAdmin={canAdmin}
+          onOpenWorkbench={() => { void agent.openWorkbench(); }}
           onToggleView={() => setView((v) => (v === "chat" ? "admin" : "chat"))}
         />
         {view === "chat" ? (

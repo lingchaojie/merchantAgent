@@ -1,5 +1,5 @@
 import { MOCK_USERS } from "../types";
-import { IconUser } from "./icons";
+import { IconBox, IconUser } from "./icons";
 
 export function TopBar({
   title,
@@ -8,6 +8,7 @@ export function TopBar({
   view,
   onToggleView,
   canAdmin,
+  onOpenWorkbench,
 }: {
   title: string;
   userId: string;
@@ -15,6 +16,7 @@ export function TopBar({
   view: "chat" | "admin";
   onToggleView: () => void;
   canAdmin: boolean | null;
+  onOpenWorkbench?: () => void;
 }): JSX.Element {
   const user = MOCK_USERS.find((u) => u.id === userId);
   const returningToChat = view === "admin";
@@ -32,6 +34,9 @@ export function TopBar({
         </span>
         <button className="kbd-btn" onClick={onToggleView} title={adminTitle} disabled={adminDisabled}>
           {view === "chat" ? "⚙ 配置" : "← 聊天"}
+        </button>
+        <button className="icon-btn" onClick={onOpenWorkbench} title="打开连接器实现工作台" aria-label="打开连接器实现工作台">
+          <IconBox width={14} height={14} />
         </button>
         <button className="kbd-btn" onClick={onCommand} title="命令面板">
           <kbd>⌘</kbd><kbd>K</kbd>

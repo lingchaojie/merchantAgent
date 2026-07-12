@@ -4,6 +4,7 @@ import { newSkillDraft } from "../../admin-ui";
 
 interface SkillEditorProps {
   skill: Skill;
+  originalAllowedTools?: string[];
   isNew: boolean;
   busy: boolean;
   tools: ToolInfo[];
@@ -18,8 +19,17 @@ function toggle(items: string[], value: string): string[] {
   return items.includes(value) ? items.filter((item) => item !== value) : [...items, value];
 }
 
+export function unavailableToolReferences(
+  selected: string[], original: string[], tools: ToolInfo[],
+): string[] {
+  const live = new Set(tools.map((tool) => tool.name));
+  const historical = new Set(original);
+  return selected.filter((name) => !live.has(name) && !historical.has(name));
+}
+
 export function SkillEditor({
   skill,
+  originalAllowedTools = skill.allowedTools,
   isNew,
   busy,
   tools,
@@ -30,6 +40,9 @@ export function SkillEditor({
   onCancel,
 }: SkillEditorProps): JSX.Element {
   const update = <K extends keyof Skill>(key: K, value: Skill[K]) => onChange({ ...skill, [key]: value });
+  const liveNames = new Set(tools.map((tool) => tool.name));
+  const historicalUnavailable = originalAllowedTools.filter((name) => !liveNames.has(name));
+  const invalidTools = unavailableToolReferences(skill.allowedTools, originalAllowedTools, tools);
 
   return (
     <div className="skill-editor">
@@ -69,6 +82,13 @@ export function SkillEditor({
             </span>
           </label>
         ))}
+        {historicalUnavailable.map((name) => (
+          <label key={name} className="chk tool-choice unavailable-tool">
+            <input type="checkbox" checked={skill.allowedTools.includes(name)} disabled={busy || !skill.allowedTools.includes(name)}
+              onChange={() => update("allowedTools", skill.allowedTools.filter((tool) => tool !== name))} />
+            <span className="tool-choice-details"><span>{name}</span><span className="tool-meta">不可用 · 仅保留历史引用，可移除但不可重新添加</span></span>
+          </label>
+        ))}
       </fieldset>
       <fieldset><legend>数据域（声明，非授权）</legend>
         {domains.map((domain) => (
@@ -89,7 +109,7 @@ export function SkillEditor({
         ))}
       </fieldset>
       <div className="pane-form">
-        <button className="btn-primary" disabled={busy || !skill.skillId.trim() || !skill.name.trim()}
+        <button className="btn-primary" disabled={busy || !skill.skillId.trim() || !skill.name.trim() || invalidTools.length > 0}
           onClick={onSave}>保存</button>
         <button className="btn" disabled={busy} onClick={onCancel}>取消</button>
       </div>
@@ -97,7 +117,7 @@ export function SkillEditor({
   );
 }
 
-export function SkillsPane({ client, tenantId }: { client: AdminClient; tenantId: string }): JSX.Element {
+export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: AdminClient; tenantId: string; refreshToken?: number }): JSX.Element {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
@@ -106,6 +126,7 @@ export function SkillsPane({ client, tenantId }: { client: AdminClient; tenantId
   const [templateId, setTemplateId] = useState("");
   const [edit, setEdit] = useState<Skill | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [originalAllowedTools, setOriginalAllowedTools] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [ok, setOk] = useState("");
@@ -122,10 +143,15 @@ export function SkillsPane({ client, tenantId }: { client: AdminClient; tenantId
     }
   }, [client]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); }, [load, refreshToken]);
 
   const save = async () => {
     if (!edit) return;
+    const invalid = unavailableToolReferences(edit.allowedTools, originalAllowedTools, tools);
+    if (invalid.length > 0) {
+      setErr(`不可保存未发布工具：${invalid.join("、")}`);
+      return;
+    }
     setBusy(true); setErr(""); setOk("");
     try {
       if (isNew) await client.createBlankSkill({ ...edit, skillId: edit.skillId.trim(), name: edit.name.trim() });
@@ -171,7 +197,7 @@ export function SkillsPane({ client, tenantId }: { client: AdminClient; tenantId
       {ok && <div className="pane-ok">{ok}</div>}
       <div className="pane-form skill-create-actions">
         <button className="btn" disabled={busy || edit !== null}
-          onClick={() => { setEdit(newSkillDraft(tenantId)); setIsNew(true); }}>新建空白技能</button>
+          onClick={() => { setEdit(newSkillDraft(tenantId)); setOriginalAllowedTools([]); setIsNew(true); }}>新建空白技能</button>
         <select value={templateId} disabled={busy} onChange={(event) => setTemplateId(event.target.value)}>
           <option value="">从模板新建…</option>
           {templates.map((template) => (
@@ -190,14 +216,14 @@ export function SkillsPane({ client, tenantId }: { client: AdminClient; tenantId
             </span>
             <span className="pane-actions">
               <button className="btn" disabled={busy}
-                onClick={() => { setEdit({ ...skill }); setIsNew(false); }}>编辑</button>
+                onClick={() => { setEdit({ ...skill }); setOriginalAllowedTools([...skill.allowedTools]); setIsNew(false); }}>编辑</button>
               <button className="btn-danger" disabled={busy} onClick={() => void remove(skill.skillId)}>删除</button>
             </span>
           </li>
         ))}
       </ul>
       {edit && (
-        <SkillEditor skill={edit} isNew={isNew} busy={busy} tools={tools} roles={roles} domains={domains}
+        <SkillEditor skill={edit} originalAllowedTools={originalAllowedTools} isNew={isNew} busy={busy} tools={tools} roles={roles} domains={domains}
           onChange={setEdit} onSave={() => void save()}
           onCancel={() => { setEdit(null); setIsNew(false); }} />
       )}

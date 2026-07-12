@@ -538,6 +538,44 @@
 .skill-fields { display: grid; grid-template-columns: minmax(140px, .7fr) minmax(180px, 1.3fr); gap: 10px; }
 .skill-editor > label > input { display: block; width: 100%; margin-top: 4px; }
 .skill-editor textarea { display: block; margin-top: 4px; }
+.unavailable-tool { opacity: .72; }
+.unavailable-tool .tool-meta { color: var(--amber); }
+
+/* ---------- Connector approval ---------- */
+.connectors-pane { max-width: 960px; }
+.connector-list { display: grid; gap: 12px; }
+.connector-empty { padding: 20px 0; color: var(--text-tertiary); font-size: 12.5px; }
+.connector-card { min-width: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-elevated); overflow: hidden; }
+.connector-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.connector-head h3 { margin: 0 0 3px; font-size: 14px; letter-spacing: 0; }
+.connector-head h3 code { margin-left: 5px; color: var(--text-secondary); font-size: 11px; }
+.connector-digest { display: block; max-width: 100%; color: var(--text-tertiary); font-size: 10.5px; overflow-wrap: anywhere; }
+.connector-state { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 6px; font-size: 11px; }
+.connector-state span, .connector-state b { padding: 2px 7px; border-radius: 5px; background: var(--bg-active); font-weight: 500; white-space: nowrap; }
+.connector-state .nonprod { color: var(--amber); background: var(--amber-soft); }
+.connector-checks, .connector-meta { display: grid; margin: 0; }
+.connector-checks { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.connector-checks div, .connector-meta div { min-width: 0; }
+.connector-checks dt, .connector-meta dt { color: var(--text-tertiary); font-size: 10.5px; }
+.connector-checks dd, .connector-meta dd { margin: 2px 0 0; color: var(--text-secondary); font-size: 11.5px; overflow-wrap: anywhere; }
+.connector-tools { padding: 0 14px; }
+.connector-tool { padding: 13px 0; }
+.connector-tool + .connector-tool { border-top: 1px solid var(--border); }
+.connector-tool-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.connector-tool-head strong { font-family: var(--mono); font-size: 12px; }
+.connector-tool-head p { margin: 2px 0 0; color: var(--text-tertiary); font-size: 11.5px; }
+.connector-risk { flex: 0 0 auto; padding: 2px 7px; border-radius: 5px; color: var(--green); background: var(--green-soft); font-size: 10.5px; }
+.connector-risk.low_write, .connector-risk.high_write { color: var(--amber); background: var(--amber-soft); }
+.connector-meta { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; margin-top: 10px; }
+.connector-contract-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(180px, .6fr); gap: 18px; margin-top: 12px; }
+.connector-contract-grid h5 { margin: 0 0 5px; color: var(--text-tertiary); font-size: 10.5px; font-weight: 500; }
+.connector-contract-grid ul { list-style: none; display: grid; gap: 4px; padding: 0; margin: 0; }
+.connector-contract-grid li { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(90px, .5fr) minmax(120px, 1fr); gap: 7px; min-width: 0; font-size: 11px; }
+.connector-contract-grid li code { overflow-wrap: anywhere; }
+.connector-contract-grid li span, .connector-contract-grid li small { color: var(--text-tertiary); overflow-wrap: anywhere; }
+.connector-fields { display: flex; flex-wrap: wrap; gap: 5px; }
+.connector-fields code { padding: 2px 5px; border-radius: 4px; background: var(--bg-input); color: var(--text-secondary); font-size: 10.5px; overflow-wrap: anywhere; }
+.connector-actions { display: flex; justify-content: flex-end; gap: 7px; padding: 10px 14px; border-top: 1px solid var(--border); }
 
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; grid-template-rows: 52px minmax(0, 1fr); }
@@ -558,4 +596,13 @@
   .rule-order { text-align: left; }
   .pane-row { align-items: flex-start; gap: 8px; }
   .pane-row code { min-width: 0; overflow-wrap: anywhere; }
+  .topbar-right { min-width: 0; gap: 5px; }
+  .topbar-right .kbd-btn { padding-left: 5px; padding-right: 5px; }
+  .connectors-pane { max-width: 100%; }
+  .connector-head { flex-direction: column; }
+  .connector-state { justify-content: flex-start; }
+  .connector-checks { grid-template-columns: 1fr; }
+  .connector-meta { grid-template-columns: 1fr; }
+  .connector-contract-grid { grid-template-columns: 1fr; }
+  .connector-contract-grid li { grid-template-columns: minmax(90px, .7fr) minmax(80px, .5fr) minmax(100px, 1fr); }
 }
