@@ -13,7 +13,7 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "vitest run",
     "capability:generate": "node scripts/generate-reference-capability.mjs",
-    "rebuild:electron": "electron-rebuild -f -w better-sqlite3",
+    "rebuild:electron": "electron-rebuild -f -w better-sqlite3,keytar",
     "dist:dir": "electron-vite build && npm run rebuild:electron && electron-builder --dir",
     "dist:win": "electron-vite build && npm run rebuild:electron && electron-builder --win",
     "dist": "electron-vite build && npm run rebuild:electron && electron-builder"
@@ -21,6 +21,7 @@
   "devDependencies": {
     "@electron/rebuild": "3.6.1",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/mssql": "12.3.0",
     "@types/node": "^22",
     "@types/react": "^18",
     "@types/react-dom": "^18",
@@ -34,6 +35,9 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
+    "keytar": "7.9.0",
+    "mssql": "12.7.0",
+    "node-sql-parser": "5.4.0",
     "react": "^18",
     "react-dom": "^18"
   },
@@ -49,10 +53,14 @@
       {
         "from": "resources/capabilities/reference-public.pem",
         "to": "capabilities/reference-public.pem"
+      },
+      {
+        "from": "resources/implementation/platform-public.pem",
+        "to": "implementation/platform-public.pem"
       }
     ],
     "npmRebuild": false,
-    "asarUnpack": ["node_modules/better-sqlite3/**/*"],
+    "asarUnpack": ["node_modules/better-sqlite3/**/*", "node_modules/keytar/**/*"],
     "win": { "target": ["nsis"] },
     "mac": { "target": ["dmg"] },
     "linux": { "target": ["AppImage"] }
