@@ -13,8 +13,8 @@ const api: WorkbenchAPI = {
   saveDraft: (sessionId, draft) => ipcRenderer.invoke(WorkbenchChannels.saveDraft, { sessionId, draft }),
   testConnection: (sessionId, draftId) =>
     ipcRenderer.invoke(WorkbenchChannels.testConnection, { sessionId, draftId }),
-  testOperation: (sessionId, draftId, args) =>
-    ipcRenderer.invoke(WorkbenchChannels.testOperation, { sessionId, draftId, args }),
+  testOperation: (sessionId, draftId, tool, args) =>
+    ipcRenderer.invoke(WorkbenchChannels.testOperation, { sessionId, draftId, tool, args }),
   closeResult: (sessionId, resultId) =>
     ipcRenderer.invoke(WorkbenchChannels.closeResult, { sessionId, resultId }),
   validateAndFreeze: (sessionId, draftId) =>

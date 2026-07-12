@@ -43,7 +43,7 @@ export function fixtureUpdateOperation(): SQLUpdateOperation {
   ].join(" ");
   return {
     kind: "update",
-    tool: "update_order_status",
+    tool: "report_production_progress",
     beforeSql: readSql,
     updateSql: [
       "UPDATE dbo.production_orders",

@@ -1,4 +1,5 @@
 import { validateOperationBeforeExecution } from "./sql-policy";
+import { assertM71Contract } from "./m7-contract";
 
 export type ConnectorEnvironment = "test" | "preproduction";
 export type ConnectorState =
@@ -506,13 +507,19 @@ export function parseConnectorPrivatePayload(value: unknown): ConnectorPrivatePa
 
 export function parseConnectorDraft(value: unknown): ConnectorDraft {
   const raw = object(value, "draft", ["draftId", "tenantId", "deviceId", "state", "payload"]);
-  return {
+  const draft = {
     draftId: identifier(raw.draftId, "draft.draftId"),
     tenantId: identifier(raw.tenantId, "draft.tenantId"),
     deviceId: identifier(raw.deviceId, "draft.deviceId"),
     state: enumValue(raw.state, "draft.state", ["draft", "locally_validated"] as const),
     payload: parseConnectorPrivatePayload(raw.payload),
   };
+  try {
+    assertM71Contract(draft.payload.publicContract, draft.payload.operations);
+  } catch {
+    fail("draft.payload.publicContract", "must match the fixed M7.1 tool contract");
+  }
+  return draft;
 }
 
 export function parseInstalledConnectorEnvelope(value: unknown): InstalledConnectorEnvelope {

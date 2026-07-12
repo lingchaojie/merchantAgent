@@ -72,7 +72,7 @@ export interface WorkbenchAPI {
   saveCredential(sessionId: string, ref: string, credential: WorkbenchCredential): Promise<void>;
   saveDraft(sessionId: string, draft: WorkbenchConnectorDraft): Promise<{ draftId: string }>;
   testConnection(sessionId: string, draftId: string): Promise<WorkbenchConnectionTestView>;
-  testOperation(sessionId: string, draftId: string, args: Record<string, unknown>): Promise<WorkbenchTestResultView>;
+  testOperation(sessionId: string, draftId: string, tool: string, args: Record<string, unknown>): Promise<WorkbenchTestResultView>;
   closeResult(sessionId: string, resultId: string): Promise<void>;
   validateAndFreeze(sessionId: string, draftId: string): Promise<WorkbenchValidationSummary>;
   submit(sessionId: string, draftId: string): Promise<{ digest: string; status: "pending_admin_approval" }>;
@@ -90,5 +90,5 @@ export interface WorkbenchUnlockReq { encodedCredential: string }
 export interface WorkbenchCredentialReq extends WorkbenchSessionReq { ref: string; credential: WorkbenchCredential }
 export interface WorkbenchDraftReq extends WorkbenchSessionReq { draft: WorkbenchConnectorDraft }
 export interface WorkbenchDraftIdReq extends WorkbenchSessionReq { draftId: string }
-export interface WorkbenchOperationReq extends WorkbenchDraftIdReq { args: Record<string, unknown> }
+export interface WorkbenchOperationReq extends WorkbenchDraftIdReq { tool: string; args: Record<string, unknown> }
 export interface WorkbenchResultReq extends WorkbenchSessionReq { resultId: string }

@@ -154,6 +154,43 @@ describe("client.chat streaming", () => {
     }]);
   });
 
+  it("routes a published connector bridge request with the enrolled device ID", async () => {
+    const stream =
+      'event: local_tool_request\ndata: {"kind":"local_tool_request","reqId":"connector-1","packageId":"sql-orders","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"backend-value","roleIds":["sales"],"skillId":"order-360","callId":"call-connector","idempotencyKey":"idem-connector","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
+      'event: local_tool_request\ndata: {"kind":"local_tool_request","reqId":"reference-1","packageId":"reference-manufacturing","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"backend-value","roleIds":["sales"],"skillId":"order-360","callId":"call-reference","idempotencyKey":"idem-reference","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
+      'event: done\ndata: {"text":"done"}\n\n';
+    let chatBody: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, opts?: { body?: string }) => {
+      if (String(url).endsWith("/chat/local-tool-result")) {
+        return { ok: true, json: async () => ({ ok: true }) } as unknown as Response;
+      }
+      chatBody = JSON.parse(opts?.body ?? "{}") as Record<string, unknown>;
+      return sseResponse(stream);
+    }));
+    const connectorRuntime = vi.fn().mockResolvedValue({
+      data: { rows: [{ orderId: "SO-1001" }] },
+      meta: { status: "succeeded", executionId: "exec", idempotencyKey: "idem-connector", confirmed: false },
+    });
+
+    await client.chat(
+      { sessionId: "s", userId: "u_sales1", question: "status" },
+      () => undefined,
+      undefined,
+      connectorRuntime,
+      { connectorDeviceId: "enrolled-device-uuid" },
+    );
+
+    expect(chatBody).toMatchObject({ deviceId: os.hostname() });
+    expect(connectorRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      packageId: "sql-orders",
+      deviceId: "enrolled-device-uuid",
+    }));
+    expect(connectorRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      packageId: "reference-manufacturing",
+      deviceId: os.hostname(),
+    }));
+  });
+
   it("posts a failed local result when the local handler throws and keeps reading", async () => {
     const stream =
       'event: local_tool_request\ndata: {"kind":"local_tool_request","reqId":"local-2","packageId":"reference-manufacturing","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"ignored","roleIds":["sales"],"skillId":"order-360","callId":"call-2","idempotencyKey":"idem-2","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +

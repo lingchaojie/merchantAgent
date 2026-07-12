@@ -166,6 +166,7 @@ app.whenReady().then(async () => {
       );
       const cleanupMain = register(new Sandbox(root), router as never, {
         openWorkbench: () => openWorkbench(workbench),
+        connectorDeviceId: enrollment.deviceId,
       });
       const cleanupWorkbench = registerWorkbench(
         workbench,

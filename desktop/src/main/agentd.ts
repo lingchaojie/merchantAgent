@@ -40,6 +40,7 @@ async function post<T>(pathname: string, body: unknown): Promise<T> {
 // returning the read content or a write confirmation (or an error string).
 export type FileRequestHandler = (e: ChatEvent) => Promise<{ content?: string; error?: string }>;
 export type LocalToolRequestHandler = (request: LocalToolRequest) => Promise<LocalToolResponse>;
+export interface ChatDeviceOptions { connectorDeviceId?: string }
 
 // chat opens the SSE stream, forwards renderer-safe events to onEvent, handles
 // privileged reverse-bridge requests locally, and resolves with the final text.
@@ -48,12 +49,17 @@ async function chat(
   onEvent: (e: ChatEvent) => void,
   onFile?: FileRequestHandler,
   onLocalTool?: LocalToolRequestHandler,
+  deviceOptions: ChatDeviceOptions = {},
 ): Promise<string> {
-  const deviceId = os.hostname();
+  const referenceDeviceId = os.hostname();
+  const connectorDeviceId = typeof deviceOptions.connectorDeviceId === "string"
+    && deviceOptions.connectorDeviceId.length > 0
+    ? deviceOptions.connectorDeviceId
+    : referenceDeviceId;
   const res = await fetch(BASE + "/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...req, deviceId }),
+    body: JSON.stringify({ ...req, deviceId: referenceDeviceId }),
   });
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => "");
@@ -78,7 +84,13 @@ async function chat(
         if (ev.text) final = ev.text;
       }
       if (ev.kind === "local_tool_request") {
-        const request = { ...(ev as unknown as LocalToolRequest), deviceId };
+        const eventRequest = ev as unknown as LocalToolRequest;
+        const request = {
+          ...eventRequest,
+          deviceId: eventRequest.packageId === "reference-manufacturing"
+            ? referenceDeviceId
+            : connectorDeviceId,
+        };
         let out: LocalToolResponse;
         try {
           out = onLocalTool

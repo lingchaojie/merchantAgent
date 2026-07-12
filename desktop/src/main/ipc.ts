@@ -59,6 +59,7 @@ function closedWorkbenchRequest(value: unknown, keys: readonly string[]): Record
 export interface IpcRegistrationOptions {
   localToolConfirmationTimeoutMs?: number;
   openWorkbench?: () => void | Promise<void>;
+  connectorDeviceId?: string;
 }
 
 function confirmationDetail(preview: unknown): string {
@@ -193,6 +194,7 @@ export function register(
         },
         (ev) => handleFileRequest(sandbox, ev),
         (request) => handleLocalToolRequest(localToolExecutor, request, confirmationTimeoutMs),
+        { connectorDeviceId: options.connectorDeviceId },
       );
     });
 
@@ -257,8 +259,13 @@ export function registerWorkbench(
       return service.testConnection(value.sessionId as string, value.draftId as string);
     });
     install(WorkbenchChannels.testOperation, (_event, req: WorkbenchOperationReq) => {
-      const value = closedWorkbenchRequest(req, ["sessionId", "draftId", "args"]);
-      return service.testOperation(value.sessionId as string, value.draftId as string, value.args as never);
+      const value = closedWorkbenchRequest(req, ["sessionId", "draftId", "tool", "args"]);
+      return service.testOperation(
+        value.sessionId as string,
+        value.draftId as string,
+        value.tool as string,
+        value.args as never,
+      );
     });
     install(WorkbenchChannels.closeResult, (_event, req: WorkbenchResultReq) => {
       const value = closedWorkbenchRequest(req, ["sessionId", "resultId"]);

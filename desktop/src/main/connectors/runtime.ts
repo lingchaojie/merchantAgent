@@ -20,6 +20,7 @@ import {
   validateOperationBeforeExecution,
   readOperationUsesResourceParameter,
 } from "./sql-policy";
+import { assertM71Contract, prepareM71Arguments } from "./m7-contract";
 
 export interface ApprovalResolver {
   getApproval(
@@ -135,6 +136,11 @@ function checkedTool(connector: LoadedApprovedConnector, request: LocalToolReque
   ) {
     throw new ConnectorError("package_version", "package_version");
   }
+  try {
+    assertM71Contract(connector.manifest.publicContract, connector.payload.operations);
+  } catch {
+    throw new ConnectorError("permission_denied", "permission_denied");
+  }
   const contract = connector.manifest.publicContract.tools.find((candidate) => candidate.name === request.tool);
   const operation = connector.payload.operations.find((candidate) => candidate.tool === request.tool);
   if (
@@ -163,7 +169,13 @@ function checkedTool(connector: LoadedApprovedConnector, request: LocalToolReque
       throw new ConnectorError("permission_denied", "permission_denied");
     }
   }
-  return operation;
+  let preparedArgs: Record<string, unknown>;
+  try {
+    preparedArgs = prepareM71Arguments(request.tool, request.args);
+  } catch {
+    throw new ConnectorError("invalid_argument", "invalid_argument");
+  }
+  return { operation, preparedArgs };
 }
 
 function normalizedError(error: unknown): ConnectorErrorCode {
@@ -217,15 +229,15 @@ export class ConnectorRuntime {
         approval.digest,
         request.tenantId,
       );
-      const operation = checkedTool(connector, request);
+      const { operation, preparedArgs } = checkedTool(connector, request);
       const credential = await this.dependencies.vault.get(connector.payload.profile.credentialRef);
       if (credential === null) throw new ConnectorError("missing_credentials", "missing_credentials");
       const source = this.dependencies.createSource(connector);
       if (operation.kind === "read") {
-        const rows = await source.executeRead(operation, request.args, controller.signal);
+        const rows = await source.executeRead(operation, preparedArgs, controller.signal);
         return { data: { rows }, meta: { ...baseMeta, status: "succeeded" } };
       }
-      const resumed = await source.resumeUpdate(operation, request.args, request.idempotencyKey, controller.signal);
+      const resumed = await source.resumeUpdate(operation, preparedArgs, request.idempotencyKey, controller.signal);
       if (resumed !== null) {
         return {
           data: { ...resumed.result },
@@ -239,7 +251,7 @@ export class ConnectorRuntime {
           },
         };
       }
-      const preview = await source.previewUpdate(operation, request.args, controller.signal);
+      const preview = await source.previewUpdate(operation, preparedArgs, controller.signal);
       if (!await confirm(preview)) {
         return {
           meta: { ...baseMeta, status: "cancelled", before: { ...preview.before } },
@@ -249,7 +261,7 @@ export class ConnectorRuntime {
       const confirmedAt = new Date().toISOString();
       const result = await source.executeConfirmedUpdate(
         operation,
-        request.args,
+        preparedArgs,
         request.idempotencyKey,
         preview,
         controller.signal,

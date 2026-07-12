@@ -94,6 +94,41 @@ function locallyValidatedDraft(): ConnectorDraft {
           maxResults: 10,
           timeoutMS: 10_000,
         },
+        {
+          kind: "update",
+          tool: "report_production_progress",
+          beforeSql: "SELECT order_id, work_order_id, status, promise_date, completion_rate, note, version FROM dbo.production_orders WHERE order_id = @orderId AND work_order_id = @workOrderId",
+          updateSql: "UPDATE dbo.production_orders SET completion_rate = @completionRate, note = @note, version = @nextVersion WHERE order_id = @orderId AND work_order_id = @workOrderId AND version = @expectedVersion",
+          readBackSql: "SELECT order_id, work_order_id, status, promise_date, completion_rate, note, version FROM dbo.production_orders WHERE order_id = @orderId AND work_order_id = @workOrderId",
+          bindings: [
+            { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 64 },
+            { parameter: "workOrderId", argument: "workOrderId", type: "NVarChar", maxLength: 64 },
+            { parameter: "completionRate", argument: "completionRate", type: "Int" },
+            { parameter: "expectedVersion", argument: "expectedVersion", type: "Int" },
+            { parameter: "note", argument: "note", type: "NVarChar", maxLength: 256 },
+            { parameter: "nextVersion", argument: "nextVersion", type: "Int" },
+          ],
+          projection: [
+            { sourceAlias: "order_id", resultField: "orderId", type: "string" },
+            { sourceAlias: "work_order_id", resultField: "workOrderId", type: "string" },
+            { sourceAlias: "status", resultField: "status", type: "string" },
+            { sourceAlias: "promise_date", resultField: "promiseDate", type: "string" },
+            { sourceAlias: "completion_rate", resultField: "completionRate", type: "integer" },
+            { sourceAlias: "note", resultField: "note", type: "string" },
+            { sourceAlias: "version", resultField: "version", type: "integer" },
+          ],
+          proposed: [
+            { resultField: "completionRate", argument: "completionRate" },
+            { resultField: "note", argument: "note", preserveIfMissing: true },
+            { resultField: "version", argument: "nextVersion" },
+          ],
+          declaredObject: "dbo.production_orders",
+          resourceParameter: "orderId",
+          concurrencyParameter: "expectedVersion",
+          updateColumns: ["completion_rate", "note", "version"],
+          versionField: "version",
+          timeoutMS: 10_000,
+        },
       ],
       publicContract: {
         tools: [
@@ -102,7 +137,7 @@ function locallyValidatedDraft(): ConnectorDraft {
             description: "Query an order status",
             parameters: {
               type: "object",
-              properties: { orderId: { type: "string", minLength: 1, maxLength: 64 } },
+              properties: { orderId: { type: "string" } },
               required: ["orderId"],
               additionalProperties: false,
             },
@@ -116,6 +151,34 @@ function locallyValidatedDraft(): ConnectorDraft {
             requiresConfirmation: false,
             timeoutMS: 10_000,
             maxResults: 10,
+          },
+          {
+            name: "report_production_progress",
+            description: "Report production progress",
+            parameters: {
+              type: "object",
+              properties: {
+                orderId: { type: "string" },
+                workOrderId: { type: "string" },
+                completionRate: { type: "integer" },
+                expectedVersion: { type: "integer" },
+                note: { type: "string" },
+              },
+              required: ["orderId", "workOrderId", "completionRate", "expectedVersion"],
+              additionalProperties: false,
+            },
+            resultFields: [
+              "orderId", "workOrderId", "status", "promiseDate", "completionRate", "note", "version",
+            ],
+            resourceType: "business_record",
+            resourceKind: "order",
+            resourceArg: "orderId",
+            resourceRelation: "operator",
+            dataDomain: "manufacturing",
+            risk: "low_write",
+            requiresConfirmation: true,
+            timeoutMS: 10_000,
+            maxResults: 1,
           },
         ],
       },
@@ -208,6 +271,15 @@ afterEach(() => {
 });
 
 describe("ConnectorPackageStore", () => {
+  it("rejects an out-of-scope tool contract before package installation", () => {
+    const fixture = fixtureStore();
+    const draft = locallyValidatedDraft();
+    draft.payload.operations[1].tool = "update_order_status";
+    draft.payload.publicContract.tools[1].name = "update_order_status";
+
+    expect(() => fixture.store.install(draft, NOW)).toThrowError("package_integrity");
+  });
+
   it("classifies an absent approved package as connector_not_installed", () => {
     const fixture = fixtureStore();
 

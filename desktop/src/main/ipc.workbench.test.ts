@@ -55,10 +55,10 @@ describe("isolated Workbench IPC", () => {
       credential: { username: "svc", password: "secret" },
     });
     await handler(WorkbenchChannels.testOperation)({}, {
-      sessionId: "s", draftId: "draft", args: { orderId: "ORD-1" },
+      sessionId: "s", draftId: "draft", tool: "query_order_status", args: { orderId: "ORD-1" },
     });
     expect(service.saveCredential).toHaveBeenCalledWith("s", "erp-test", { username: "svc", password: "secret" });
-    expect(service.testOperation).toHaveBeenCalledWith("s", "draft", { orderId: "ORD-1" });
+    expect(service.testOperation).toHaveBeenCalledWith("s", "draft", "query_order_status", { orderId: "ORD-1" });
 
     cleanup();
     expect(electron.ipcMain.removeHandler).toHaveBeenCalledTimes(Object.values(WorkbenchChannels).length);

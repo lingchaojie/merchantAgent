@@ -25,7 +25,7 @@ function fixtureUpdateOperation(): SQLUpdateOperation {
   const readSql = "SELECT o.order_id AS order_id, o.status AS order_status, o.row_version AS row_version FROM dbo.production_orders AS o WHERE o.order_id = @orderId";
   return {
     kind: "update",
-    tool: "update_order_status",
+    tool: "report_production_progress",
     beforeSql: readSql,
     updateSql: "UPDATE dbo.production_orders SET status = @status, row_version = @nextVersion WHERE order_id = @orderId AND row_version = @expectedVersion",
     readBackSql: readSql,

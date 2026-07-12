@@ -13,6 +13,7 @@ import {
   type VerifiedImplementationCredential,
 } from "./schema";
 import { validateOperationBeforeExecution } from "./sql-policy";
+import { prepareM71Arguments } from "./m7-contract";
 
 export interface WorkbenchSessionView {
   sessionId: string;
@@ -219,19 +220,23 @@ export class WorkbenchService {
   async testOperation(
     sessionId: string,
     draftId: string,
+    tool: string,
     args: Record<string, unknown>,
   ): Promise<WorkbenchTestResult> {
     const session = this.requireSession(sessionId, "connector:test");
     const draft = this.requireDraft(session, draftId);
-    if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    const operation = draft.payload.operations.find((candidate) => candidate.tool === tool);
+    if (operation === undefined) throw workbenchError("workbench_invalid_request");
+    let preparedArgs: Record<string, unknown>;
+    try {
+      preparedArgs = prepareM71Arguments(tool, args);
+    } catch {
       throw workbenchError("workbench_invalid_request");
     }
-    const operation = draft.payload.operations[0];
-    if (operation === undefined) throw workbenchError("workbench_invalid_request");
     validateOperationBeforeExecution(operation);
     const tested = await this.tester(session, draft).testOperation(
       operation,
-      strictJSONSnapshot(args),
+      strictJSONSnapshot(preparedArgs),
       session.controller.signal,
     );
     this.requireSameSession(session);

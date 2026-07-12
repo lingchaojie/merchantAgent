@@ -38,13 +38,45 @@ function draft(draftId = "draft-1"): ConnectorDraft {
         declaredObjects: ["dbo.orders"],
         maxResults: 10,
         timeoutMS: 5_000,
+      }, {
+        kind: "update",
+        tool: "report_production_progress",
+        beforeSql: "SELECT o.order_id AS order_id, o.work_order_id AS work_order_id, o.completion_rate AS completion_rate, o.note AS note, o.version AS version FROM dbo.orders o WHERE o.order_id = @orderId AND o.work_order_id = @workOrderId",
+        updateSql: "UPDATE dbo.orders SET completion_rate = @completionRate, note = @note, version = @nextVersion WHERE order_id = @orderId AND work_order_id = @workOrderId AND version = @expectedVersion",
+        readBackSql: "SELECT o.order_id AS order_id, o.work_order_id AS work_order_id, o.completion_rate AS completion_rate, o.note AS note, o.version AS version FROM dbo.orders o WHERE o.order_id = @orderId AND o.work_order_id = @workOrderId",
+        bindings: [
+          { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 32 },
+          { parameter: "workOrderId", argument: "workOrderId", type: "NVarChar", maxLength: 32 },
+          { parameter: "completionRate", argument: "completionRate", type: "Int" },
+          { parameter: "expectedVersion", argument: "expectedVersion", type: "Int" },
+          { parameter: "note", argument: "note", type: "NVarChar", maxLength: 100 },
+          { parameter: "nextVersion", argument: "nextVersion", type: "Int" },
+        ],
+        projection: [
+          { sourceAlias: "order_id", resultField: "orderId", type: "string" },
+          { sourceAlias: "work_order_id", resultField: "workOrderId", type: "string" },
+          { sourceAlias: "completion_rate", resultField: "completionRate", type: "integer" },
+          { sourceAlias: "note", resultField: "note", type: "string" },
+          { sourceAlias: "version", resultField: "version", type: "integer" },
+        ],
+        proposed: [
+          { resultField: "completionRate", argument: "completionRate" },
+          { resultField: "note", argument: "note", preserveIfMissing: true },
+          { resultField: "version", argument: "nextVersion" },
+        ],
+        declaredObject: "dbo.orders",
+        resourceParameter: "orderId",
+        concurrencyParameter: "expectedVersion",
+        updateColumns: ["completion_rate", "note", "version"],
+        versionField: "version",
+        timeoutMS: 5_000,
       }],
       publicContract: { tools: [{
         name: "query_order_status",
         description: "query order",
         parameters: {
           type: "object",
-          properties: { orderId: { type: "string", minLength: 1, maxLength: 32 } },
+          properties: { orderId: { type: "string" } },
           required: ["orderId"],
           additionalProperties: false,
         },
@@ -58,6 +90,31 @@ function draft(draftId = "draft-1"): ConnectorDraft {
         requiresConfirmation: false,
         timeoutMS: 5_000,
         maxResults: 10,
+      }, {
+        name: "report_production_progress",
+        description: "report progress",
+        parameters: {
+          type: "object",
+          properties: {
+            orderId: { type: "string" },
+            workOrderId: { type: "string" },
+            completionRate: { type: "integer" },
+            expectedVersion: { type: "integer" },
+            note: { type: "string" },
+          },
+          required: ["orderId", "workOrderId", "completionRate", "expectedVersion"],
+          additionalProperties: false,
+        },
+        resultFields: ["orderId", "workOrderId", "completionRate", "note", "version"],
+        resourceType: "business_record",
+        resourceKind: "order",
+        resourceArg: "orderId",
+        resourceRelation: "operator",
+        dataDomain: "manufacturing",
+        risk: "low_write",
+        requiresConfirmation: true,
+        timeoutMS: 5_000,
+        maxResults: 1,
       }] },
       checker: { version: "checker-1", rulesetVersion: "m7.1-sql-v1", testsDigest: DIGEST },
     },
@@ -115,7 +172,9 @@ describe("WorkbenchService isolation", () => {
     const session = await f.service.unlock("encoded");
     await f.service.saveDraft(session.sessionId, draft());
 
-    const result = await f.service.testOperation(session.sessionId, "draft-1", { orderId: "ORD-1001" });
+    const result = await f.service.testOperation(
+      session.sessionId, "draft-1", "query_order_status", { orderId: "ORD-1001" },
+    );
 
     expect(result.raw).toEqual([{ order_id: "ORD-1001", internal_cost: 900 }]);
     expect(f.service.readResult(session.sessionId, result.resultId).raw).toEqual(result.raw);
@@ -124,13 +183,34 @@ describe("WorkbenchService isolation", () => {
     expect(JSON.stringify(f.service.diagnosticState())).not.toContain("internal_cost");
   });
 
+  it("selects report_production_progress deterministically by tool identity", async () => {
+    const f = fixture();
+    const session = await f.service.unlock("encoded");
+    await f.service.saveDraft(session.sessionId, draft());
+
+    await f.service.testOperation(session.sessionId, "draft-1", "report_production_progress", {
+      orderId: "ORD-1001",
+      workOrderId: "WO-1001",
+      completionRate: 80,
+      expectedVersion: 1,
+    });
+
+    expect(f.tester.testOperation).toHaveBeenCalledWith(
+      expect.objectContaining({ tool: "report_production_progress", kind: "update" }),
+      expect.objectContaining({ orderId: "ORD-1001", workOrderId: "WO-1001" }),
+      expect.any(AbortSignal),
+    );
+  });
+
   it("actively erases raw rows when the result TTL elapses", async () => {
     vi.useFakeTimers();
     try {
       const f = fixture();
       const session = await f.service.unlock("encoded");
       await f.service.saveDraft(session.sessionId, draft());
-      await f.service.testOperation(session.sessionId, "draft-1", { orderId: "ORD-1001" });
+      await f.service.testOperation(
+        session.sessionId, "draft-1", "query_order_status", { orderId: "ORD-1001" },
+      );
 
       await vi.advanceTimersByTimeAsync(30_000);
 
@@ -144,7 +224,9 @@ describe("WorkbenchService isolation", () => {
     const f = fixture();
     const session = await f.service.unlock("encoded");
     await f.service.saveDraft(session.sessionId, draft());
-    const result = await f.service.testOperation(session.sessionId, "draft-1", { orderId: "ORD-1001" });
+    const result = await f.service.testOperation(
+      session.sessionId, "draft-1", "query_order_status", { orderId: "ORD-1001" },
+    );
 
     await f.service.saveDraft(session.sessionId, draft("draft-2"));
 
@@ -168,7 +250,9 @@ describe("WorkbenchService isolation", () => {
     const session = await f.service.unlock("encoded");
     await f.service.saveDraft(session.sessionId, draft());
 
-    const testing = f.service.testOperation(session.sessionId, "draft-1", { orderId: "ORD-1001" });
+    const testing = f.service.testOperation(
+      session.sessionId, "draft-1", "query_order_status", { orderId: "ORD-1001" },
+    );
     await Promise.resolve();
     f.service.lock(session.sessionId);
 
@@ -202,7 +286,9 @@ describe("WorkbenchService isolation", () => {
     const f = fixture();
     const session = await f.service.unlock("encoded");
     await f.service.saveDraft(session.sessionId, draft());
-    const result = await f.service.testOperation(session.sessionId, "draft-1", { orderId: "ORD-1001" });
+    const result = await f.service.testOperation(
+      session.sessionId, "draft-1", "query_order_status", { orderId: "ORD-1001" },
+    );
     f.advance(new Date("2026-07-13T11:00:00Z"));
 
     expect(() => f.service.readResult(session.sessionId, result.resultId)).toThrowError("workbench_session_expired");

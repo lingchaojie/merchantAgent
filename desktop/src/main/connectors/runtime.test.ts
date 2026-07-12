@@ -22,70 +22,109 @@ function readOperation(): SQLReadOperation {
 
 function updateOperation(): SQLUpdateOperation {
   const readSql = [
-    "SELECT o.order_id AS order_id, o.status AS order_status, o.row_version AS row_version",
+    "SELECT o.order_id AS order_id, o.work_order_id AS work_order_id, o.status AS order_status,",
+    "o.promise_date AS promise_date, o.completion_rate AS completion_rate, o.note AS progress_note,",
+    "o.version AS record_version",
     "FROM dbo.production_orders AS o",
-    "WHERE o.order_id = @orderId",
+    "WHERE o.order_id = @orderId AND o.work_order_id = @workOrderId",
   ].join(" ");
   return {
     kind: "update",
-    tool: "update_order_status",
+    tool: "report_production_progress",
     beforeSql: readSql,
-    updateSql: "UPDATE dbo.production_orders SET status = @status, row_version = @nextVersion WHERE order_id = @orderId AND row_version = @expectedVersion",
+    updateSql: [
+      "UPDATE dbo.production_orders",
+      "SET completion_rate = @completionRate, note = @note, version = @nextVersion",
+      "WHERE order_id = @orderId AND work_order_id = @workOrderId AND version = @expectedVersion",
+    ].join(" "),
     readBackSql: readSql,
     bindings: [
       { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 32 },
-      { parameter: "status", argument: "status", type: "NVarChar", maxLength: 32 },
+      { parameter: "workOrderId", argument: "workOrderId", type: "NVarChar", maxLength: 32 },
+      { parameter: "completionRate", argument: "completionRate", type: "Int" },
+      { parameter: "note", argument: "note", type: "NVarChar", maxLength: 100 },
       { parameter: "nextVersion", argument: "nextVersion", type: "Int" },
       { parameter: "expectedVersion", argument: "expectedVersion", type: "Int" },
     ],
     projection: [
       { sourceAlias: "order_id", resultField: "orderId", type: "string" },
+      { sourceAlias: "work_order_id", resultField: "workOrderId", type: "string" },
       { sourceAlias: "order_status", resultField: "status", type: "string" },
-      { sourceAlias: "row_version", resultField: "rowVersion", type: "integer" },
+      { sourceAlias: "promise_date", resultField: "promiseDate", type: "string" },
+      { sourceAlias: "completion_rate", resultField: "completionRate", type: "integer" },
+      { sourceAlias: "progress_note", resultField: "note", type: "string" },
+      { sourceAlias: "record_version", resultField: "version", type: "integer" },
     ],
     proposed: [
-      { resultField: "status", argument: "status" },
-      { resultField: "rowVersion", argument: "nextVersion" },
+      { resultField: "completionRate", argument: "completionRate" },
+      { resultField: "note", argument: "note" },
+      { resultField: "version", argument: "nextVersion" },
     ],
     declaredObject: "dbo.production_orders",
     resourceParameter: "orderId",
     concurrencyParameter: "expectedVersion",
-    updateColumns: ["status", "row_version"],
-    versionField: "row_version",
+    updateColumns: ["completion_rate", "note", "version"],
+    versionField: "version",
     timeoutMS: 5_000,
   };
 }
 
-function loaded(operation: SQLReadOperation | SQLUpdateOperation = readOperation()): LoadedApprovedConnector {
-  const isRead = operation.kind === "read";
-  const properties: PublicToolContract["parameters"]["properties"] = isRead
-    ? { orderId: { type: "string", minLength: 1, maxLength: 32 } }
-    : {
-        orderId: { type: "string", minLength: 1, maxLength: 32 },
-        status: { type: "string", maxLength: 32 },
-        expectedVersion: { type: "integer", minimum: 0 },
-        nextVersion: { type: "integer", minimum: 1 },
-      };
-  const tool: PublicToolContract = {
-    name: operation.tool,
-    description: "fixture tool",
+function readTool(operation: SQLReadOperation): PublicToolContract {
+  return {
+    name: "query_order_status",
+    description: "query order status",
     parameters: {
       type: "object" as const,
-      properties,
-      required: isRead ? ["orderId"] : ["orderId", "status", "expectedVersion", "nextVersion"],
+      properties: { orderId: { type: "string" } },
+      required: ["orderId"],
       additionalProperties: false as const,
     },
-    resultFields: isRead ? ["orderId"] : ["orderId", "status", "rowVersion"],
+    resultFields: operation.projection.map((projection) => projection.resultField),
     resourceType: "business_record" as const,
     resourceKind: "order",
     resourceArg: "orderId",
-    resourceRelation: isRead ? "viewer" as const : "operator" as const,
+    resourceRelation: "viewer",
     dataDomain: "manufacturing",
-    risk: isRead ? "read" as const : "low_write" as const,
-    requiresConfirmation: !isRead,
+    risk: "read",
+    requiresConfirmation: false,
     timeoutMS: 5_000,
-    maxResults: isRead ? 10 : 1,
+    maxResults: 10,
   };
+}
+
+function writeTool(operation: SQLUpdateOperation): PublicToolContract {
+  return {
+    name: "report_production_progress",
+    description: "report production progress",
+    parameters: {
+      type: "object",
+      properties: {
+        orderId: { type: "string" },
+        workOrderId: { type: "string" },
+        completionRate: { type: "integer" },
+        expectedVersion: { type: "integer" },
+        note: { type: "string" },
+      },
+      required: ["orderId", "workOrderId", "completionRate", "expectedVersion"],
+      additionalProperties: false,
+    },
+    resultFields: operation.projection.map((projection) => projection.resultField),
+    resourceType: "business_record",
+    resourceKind: "order",
+    resourceArg: "orderId",
+    resourceRelation: "operator",
+    dataDomain: "manufacturing",
+    risk: "low_write",
+    requiresConfirmation: true,
+    timeoutMS: 5_000,
+    maxResults: 1,
+  };
+}
+
+function loaded(replacement?: SQLReadOperation | SQLUpdateOperation): LoadedApprovedConnector {
+  const read = replacement?.kind === "read" ? replacement : readOperation();
+  const update = replacement?.kind === "update" ? replacement : updateOperation();
+  const publicContract = { tools: [readTool(read), writeTool(update)] };
   return {
     ref: { connectorId: "sql-orders", version: "1.0.0" },
     path: "fixture.ma-connector",
@@ -95,7 +134,7 @@ function loaded(operation: SQLReadOperation | SQLUpdateOperation = readOperation
       adapter: "sqlserver",
       environment: "test",
       digest: DIGEST,
-      publicContract: { tools: [tool] },
+      publicContract,
       checks: { checkerVersion: "1", rulesetVersion: "m7.1-sql-v1", testsDigest: DIGEST },
       credentialId: "implementation-1",
       deviceId: "device-1",
@@ -118,8 +157,8 @@ function loaded(operation: SQLReadOperation | SQLUpdateOperation = readOperation
         credentialRef: "erp-test",
         environment: "test",
       },
-      operations: [operation],
-      publicContract: { tools: [tool] },
+      operations: [read, update],
+      publicContract,
       checker: { version: "1", rulesetVersion: "m7.1-sql-v1", testsDigest: DIGEST },
     },
   };
@@ -284,18 +323,48 @@ describe("ConnectorRuntime Gate C", () => {
   it("executes a low write only after confirmation", async () => {
     const f = fixture(updateOperation());
     const write = request({
-      tool: "update_order_status",
+      tool: "report_production_progress",
       risk: "low_write",
       requiresConfirmation: true,
-      args: { orderId: "ORD-1001", status: "done", expectedVersion: 1, nextVersion: 2 },
+      args: {
+        orderId: "ORD-1001",
+        workOrderId: "WO-1001",
+        completionRate: 80,
+        expectedVersion: 1,
+        note: "done",
+      },
     });
 
     const denied = await f.runtime.execute(write, async () => false);
     const accepted = await f.runtime.execute({ ...write, idempotencyKey: "idem-2" }, async () => true);
 
     expect(denied.meta.status).toBe("cancelled");
+    expect(f.source.previewUpdate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ expectedVersion: 1, nextVersion: 2 }),
+      expect.any(AbortSignal),
+    );
     expect(f.source.executeConfirmedUpdate).toHaveBeenCalledOnce();
     expect(accepted).toMatchObject({ data: { orderId: "ORD-1001", version: 2 }, meta: { confirmed: true } });
+  });
+
+  it("defensively denies an arbitrary manifest tool before credentials", async () => {
+    const f = fixture();
+    const connector = loaded();
+    connector.manifest.publicContract.tools[1].name = "update_order_status";
+    connector.payload.publicContract.tools[1].name = "update_order_status";
+    connector.payload.operations[1].tool = "update_order_status";
+    f.loadApproved.mockReturnValue(connector);
+
+    const result = await f.runtime.execute(request({
+      tool: "update_order_status",
+      risk: "low_write",
+      requiresConfirmation: true,
+      args: { orderId: "ORD-1001" },
+    }), async () => true);
+
+    expect(result.error).toBe("permission_denied");
+    expect(f.credentialGet).not.toHaveBeenCalled();
   });
 });
 
