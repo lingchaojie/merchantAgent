@@ -1,4 +1,5 @@
-import type { PublicToolContract, SQLOperation } from "./schema";
+import type { PublicToolContract, SQLBinding, SQLOperation, SQLUpdateOperation } from "./schema";
+import { validateOperationBeforeExecution } from "./sql-policy";
 
 type ParameterType = "string" | "integer";
 
@@ -69,6 +70,77 @@ function assertTool(tool: PublicToolContract, expected: FixedTool): void {
   }
 }
 
+function assertBindingType(binding: SQLBinding, type: ParameterType): void {
+  if (type === "integer") {
+    if (binding.type !== "Int" || binding.maxLength !== undefined) contractError();
+    return;
+  }
+  if (
+    binding.type !== "NVarChar"
+    || !Number.isSafeInteger(binding.maxLength)
+    || binding.maxLength < 1
+    || binding.maxLength > 4_000
+  ) contractError();
+}
+
+function exactBindings(
+  operation: SQLOperation,
+  expected: FixedTool,
+): ReadonlyMap<string, SQLBinding> {
+  const expectedTypes: Record<string, ParameterType> = {
+    ...expected.properties,
+    ...(expected.kind === "update" ? { nextVersion: "integer" as const } : {}),
+  };
+  const names = Object.keys(expectedTypes);
+  if (operation.bindings.length !== names.length) contractError();
+  const bindings = new Map<string, SQLBinding>();
+  for (const name of names) {
+    const matches = operation.bindings.filter((binding) => binding.argument === name);
+    if (matches.length !== 1) contractError();
+    const binding = matches[0];
+    const type = expectedTypes[name];
+    if (binding === undefined || type === undefined) contractError();
+    assertBindingType(binding, type);
+    bindings.set(name, binding);
+  }
+  return bindings;
+}
+
+function exactProposedField(
+  operation: SQLUpdateOperation,
+  argument: string,
+  resultField: string,
+  preserveIfMissing: boolean | undefined,
+): number {
+  const indexes = operation.proposed.flatMap((field, index) => field.argument === argument ? [index] : []);
+  if (indexes.length !== 1) contractError();
+  const index = indexes[0];
+  const field = operation.proposed[index];
+  if (
+    index === undefined
+    || field === undefined
+    || field.resultField !== resultField
+    || field.preserveIfMissing !== preserveIfMissing
+  ) contractError();
+  return index;
+}
+
+function assertUpdateRoles(
+  operation: SQLUpdateOperation,
+  bindings: ReadonlyMap<string, SQLBinding>,
+): void {
+  if (
+    operation.resourceParameter !== bindings.get("orderId")?.parameter
+    || operation.concurrencyParameter !== bindings.get("expectedVersion")?.parameter
+    || operation.versionField !== "version"
+    || operation.proposed.length !== 3
+  ) contractError();
+  exactProposedField(operation, "completionRate", "completionRate", undefined);
+  exactProposedField(operation, "note", "note", true);
+  const versionIndex = exactProposedField(operation, "nextVersion", operation.versionField, undefined);
+  if (operation.updateColumns[versionIndex]?.toLowerCase() !== operation.versionField.toLowerCase()) contractError();
+}
+
 export function assertM71Contract(
   publicContract: { tools: PublicToolContract[] },
   operations: SQLOperation[],
@@ -83,11 +155,13 @@ export function assertM71Contract(
       contractError();
     }
     assertTool(tool, expected);
-    const bindingArguments = operation.bindings.map((binding) => binding.argument);
-    const expectedArguments = expected.kind === "update"
-      ? [...Object.keys(expected.properties), "nextVersion"]
-      : Object.keys(expected.properties);
-    if (!sameSet(bindingArguments, expectedArguments)) contractError();
+    const bindings = exactBindings(operation, expected);
+    if (operation.kind === "update") assertUpdateRoles(operation, bindings);
+    try {
+      validateOperationBeforeExecution(operation);
+    } catch {
+      contractError();
+    }
   }
 }
 

@@ -57,7 +57,7 @@ function updateOperation(): SQLUpdateOperation {
     ],
     proposed: [
       { resultField: "completionRate", argument: "completionRate" },
-      { resultField: "note", argument: "note" },
+      { resultField: "note", argument: "note", preserveIfMissing: true },
       { resultField: "version", argument: "nextVersion" },
     ],
     declaredObject: "dbo.production_orders",
@@ -365,6 +365,35 @@ describe("ConnectorRuntime Gate C", () => {
 
     expect(result.error).toBe("permission_denied");
     expect(f.credentialGet).not.toHaveBeenCalled();
+  });
+
+  it("defensively denies a malformed fixed binding before credential or source access", async () => {
+    const f = fixture();
+    const connector = loaded();
+    const operation = connector.payload.operations[1];
+    operation.bindings[2] = {
+      parameter: "completionRate",
+      argument: "completionRate",
+      type: "NVarChar",
+      maxLength: 16,
+    };
+    f.loadApproved.mockReturnValue(connector);
+
+    const result = await f.runtime.execute(request({
+      tool: "report_production_progress",
+      risk: "low_write",
+      requiresConfirmation: true,
+      args: {
+        orderId: "ORD-1001",
+        workOrderId: "WO-1001",
+        completionRate: 80,
+        expectedVersion: 1,
+      },
+    }), async () => true);
+
+    expect(result.error).toBe("permission_denied");
+    expect(f.credentialGet).not.toHaveBeenCalled();
+    expect(f.dependencies.createSource).not.toHaveBeenCalled();
   });
 });
 

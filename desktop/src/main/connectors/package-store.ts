@@ -14,6 +14,7 @@ import {
   parseEd25519PublicKeyPem,
   verifyImplementationCredential,
 } from "./implementation-credential";
+import { assertM71Contract } from "./m7-contract";
 import {
   ConnectorSchemaError,
   parseConnectorDraft,
@@ -303,6 +304,7 @@ class ConnectorPackageCore {
     try {
       const decoded: unknown = JSON.parse(canonicalPayload);
       payload = parseConnectorPrivatePayload(decoded);
+      assertM71Contract(payload.publicContract, payload.operations);
       if (canonicalJSONStringify(decoded) !== canonicalPayload) return packageIntegrity("payload is not canonical JSON");
     } catch (error) {
       if (error instanceof ConnectorPackageError) throw error;

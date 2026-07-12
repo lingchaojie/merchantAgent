@@ -280,6 +280,46 @@ describe("ConnectorPackageStore", () => {
     expect(() => fixture.store.install(draft, NOW)).toThrowError("package_integrity");
   });
 
+  it("rejects a fixed-contract SQL binding type mismatch before package installation", () => {
+    const fixture = fixtureStore();
+    const draft = locallyValidatedDraft();
+    const operation = draft.payload.operations[1];
+    operation.bindings[2] = {
+      parameter: "completionRate",
+      argument: "completionRate",
+      type: "NVarChar",
+      maxLength: 16,
+    };
+
+    expect(() => fixture.store.install(draft, NOW)).toThrowError("package_integrity");
+  });
+
+  it("rejects a re-signed fixed-contract binding mismatch while loading a package", () => {
+    const fixture = fixtureStore();
+    const installed = fixture.store.install(locallyValidatedDraft(), NOW);
+    const identity = fixture.identityStore.bindImplementationCredential(
+      readEnvelope(installed).implementationCredential,
+      fixture.platform.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      NOW,
+    );
+    resignEnvelope(installed, fixture.safeStorage, (payload) => {
+      const operations = payload.operations as Array<Record<string, unknown>>;
+      const update = operations[1];
+      const bindings = update.bindings as Array<Record<string, unknown>>;
+      bindings[2] = {
+        parameter: "completionRate",
+        argument: "completionRate",
+        type: "NVarChar",
+        maxLength: 16,
+      };
+    }, (input) => identity.sign(input));
+    const malformed = readEnvelope(installed);
+
+    expect(() => fixture.store.loadApproved(installed.ref, malformed.manifest.digest)).toThrowError(
+      "package_integrity",
+    );
+  });
+
   it("classifies an absent approved package as connector_not_installed", () => {
     const fixture = fixtureStore();
 
