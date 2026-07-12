@@ -1,3 +1,5 @@
+import { validateOperationBeforeExecution } from "./sql-policy";
+
 export type ConnectorEnvironment = "test" | "preproduction";
 export type ConnectorState =
   | "draft"
@@ -472,6 +474,7 @@ export function parseConnectorPrivatePayload(value: unknown): ConnectorPrivatePa
   if (raw.schemaVersion !== 1 || raw.adapter !== "sqlserver") fail("payload", "has an unsupported schema or adapter");
   const profile = parseProfile(raw.profile, "payload.profile");
   const operations = array(raw.operations, "payload.operations", parseOperation);
+  for (const operation of operations) validateOperationBeforeExecution(operation);
   const publicContract = parsePublicContract(raw.publicContract, "payload.publicContract");
   const operationTools = new Set(operations.map((operation) => operation.tool));
   if (operationTools.size !== operations.length) fail("payload.operations", "contains duplicate tool operations");
