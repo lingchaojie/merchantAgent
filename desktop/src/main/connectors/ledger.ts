@@ -3,7 +3,7 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 
-import { canonicalJSONStringify } from "./canonical";
+import { canonicalJSONStringify, strictJSONSnapshot } from "./canonical";
 import { ConnectorError, type ConnectorErrorCode } from "./schema";
 
 export type LedgerStatus = "pending" | "succeeded" | "unknown";
@@ -58,7 +58,7 @@ function requiredString(value: unknown): string {
 function encodeRecord(value: unknown): string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw publicError("invalid_argument");
   try {
-    return canonicalJSONStringify(value);
+    return canonicalJSONStringify(strictJSONSnapshot(value));
   } catch {
     throw publicError("invalid_argument");
   }

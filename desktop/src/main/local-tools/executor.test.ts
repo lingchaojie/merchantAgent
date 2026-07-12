@@ -384,6 +384,50 @@ describe("LocalToolExecutor", () => {
     });
   });
 
+  it("checks an existing SQL idempotency key before ordinary argument type validation", async () => {
+    const runtime = sqlRuntime({
+      resumeUpdate: vi.fn().mockRejectedValue(Object.assign(new Error("static"), { code: "source_conflict" })),
+    });
+    const confirm = vi.fn();
+    const changed = progressRequest({
+      args: {
+        orderId: "SO-1001",
+        workOrderId: "WO-1001",
+        completionRate: "type-invalid",
+        expectedVersion: 1,
+        note: "waiting for QA",
+      },
+    });
+
+    const response = await new LocalToolExecutor(pkg, store, runtime).execute(changed, confirm);
+
+    expect(runtime.adapter.resumeUpdate).toHaveBeenCalledOnce();
+    expect(response).toMatchObject({ error: "source_conflict", meta: { status: "source_conflict" } });
+    expect(confirm).not.toHaveBeenCalled();
+    expect(runtime.adapter.previewUpdate).not.toHaveBeenCalled();
+    expect(runtime.adapter.executeConfirmedUpdate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a missing-key invalid SQL request out of pending state", async () => {
+    const runtime = sqlRuntime();
+    const invalid = progressRequest({
+      args: {
+        orderId: "SO-1001",
+        workOrderId: "WO-1001",
+        completionRate: "type-invalid",
+        expectedVersion: 1,
+        note: "waiting for QA",
+      },
+    });
+
+    const response = await new LocalToolExecutor(pkg, store, runtime).execute(invalid, vi.fn());
+
+    expect(runtime.adapter.resumeUpdate).toHaveBeenCalledOnce();
+    expect(response).toMatchObject({ error: "invalid_argument", meta: { status: "failed" } });
+    expect(runtime.adapter.previewUpdate).not.toHaveBeenCalled();
+    expect(runtime.adapter.executeConfirmedUpdate).not.toHaveBeenCalled();
+  });
+
   it("preserves confirmation metadata when SQL finalization is unknown", async () => {
     const runtime = sqlRuntime({
       executeConfirmedUpdate: vi.fn().mockRejectedValue(Object.assign(new Error("hidden"), { code: "unknown" })),

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 
 import * as mssql from "mssql";
 
-import { canonicalJSONStringify } from "./canonical";
+import { canonicalJSONStringify, strictJSONSnapshot } from "./canonical";
 import type { CredentialVault } from "./credential-vault";
 import type { BeginResult, LedgerEntry, LedgerInput } from "./ledger";
 import {
@@ -457,63 +457,13 @@ function projectSingleRow(
   return projectRows(recordset, projections, 1)[0] ?? null;
 }
 
-function immutableJSONValue(
-  value: unknown,
-  failureCode: ConnectorErrorCode,
-  ancestors: Set<object>,
-): unknown {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw publicError(failureCode);
-    return value;
-  }
-  if (typeof value !== "object" || ancestors.has(value)) throw publicError(failureCode);
-  ancestors.add(value);
-  try {
-    if (Array.isArray(value)) {
-      const expectedKeys = new Set<PropertyKey>([
-        "length",
-        ...Array.from({ length: value.length }, (_, index) => String(index)),
-      ]);
-      const ownKeys = Reflect.ownKeys(value);
-      if (ownKeys.length !== expectedKeys.size || ownKeys.some((key) => !expectedKeys.has(key))) {
-        throw publicError(failureCode);
-      }
-      const clone = Array.from({ length: value.length }, (_item, index) => {
-        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-        if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
-          throw publicError(failureCode);
-        }
-        return immutableJSONValue(descriptor.value, failureCode, ancestors);
-      });
-      return Object.freeze(clone);
-    }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) throw publicError(failureCode);
-    const clone: Record<string, unknown> = {};
-    for (const key of Reflect.ownKeys(value)) {
-      if (typeof key !== "string") throw publicError(failureCode);
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
-        throw publicError(failureCode);
-      }
-      Object.defineProperty(clone, key, {
-        configurable: false,
-        enumerable: true,
-        writable: false,
-        value: immutableJSONValue(descriptor.value, failureCode, ancestors),
-      });
-    }
-    canonicalJSONStringify(clone);
-    return Object.freeze(clone);
-  } finally {
-    ancestors.delete(value);
-  }
-}
-
 function immutableRecord(value: unknown, failureCode: ConnectorErrorCode): Readonly<Record<string, unknown>> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw publicError(failureCode);
-  return immutableJSONValue(value, failureCode, new Set()) as Readonly<Record<string, unknown>>;
+  try {
+    return strictJSONSnapshot(value) as Readonly<Record<string, unknown>>;
+  } catch {
+    throw publicError(failureCode);
+  }
 }
 
 function projectedRecord(
@@ -652,6 +602,37 @@ async function rollbackQuietly(transaction: mssql.Transaction | undefined): Prom
   });
   await Promise.race([rollingBack, deadline]);
   if (timer !== undefined) clearTimeout(timer);
+}
+
+async function commitBeforeDeadline(
+  transaction: mssql.Transaction,
+  deadlineAt: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const committing = Promise.resolve(transaction.commit());
+  const observed = committing.then(
+    () => "committed" as const,
+    () => "rejected" as const,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const deadline = new Promise<"deadline">((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), Math.max(0, deadlineAt - Date.now()));
+  });
+  const aborted = signal === undefined
+    ? new Promise<never>(() => undefined)
+    : new Promise<"aborted">((resolve) => {
+      onAbort = (): void => resolve("aborted");
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  try {
+    const outcome = await Promise.race([observed, deadline, aborted]);
+    if (outcome !== "committed") throw publicError("unknown");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (signal !== undefined && onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+  }
 }
 
 async function queryWithAbort(
@@ -833,6 +814,7 @@ export class SQLServerAdapter {
       throwIfAborted(signal);
       const write = this.requireWriteOptions();
       const snapshot = snapshotUpdateOperation(operation);
+      const deadlineAt = Date.now() + snapshot.timeoutMS;
       validateRuntimeUpdateOperation(snapshot);
       validateUpdateOperation(snapshot);
       const argsSnapshot = immutableRecord(args, "invalid_argument") as Record<string, unknown>;
@@ -866,7 +848,7 @@ export class SQLServerAdapter {
       if (begin.kind === "recover") {
         return this.recoverEntry(snapshot, materializedValues, fingerprint, begin.entry, signal);
       }
-      return this.executeCreatedUpdate(snapshot, materializedValues, begin.entry, signal);
+      return this.executeCreatedUpdate(snapshot, materializedValues, begin.entry, deadlineAt, signal);
     } catch (error) {
       throw normalizeFailure(error).error;
     }
@@ -979,6 +961,7 @@ export class SQLServerAdapter {
     operation: SQLUpdateOperation,
     values: ReadonlyMap<string, unknown>,
     entry: LedgerEntry,
+    deadlineAt: number,
     signal: AbortSignal | undefined,
   ): Promise<Record<string, unknown>> {
     const write = this.requireWriteOptions();
@@ -1027,7 +1010,7 @@ export class SQLServerAdapter {
       }
 
       commitAttempted = true;
-      await transaction.commit();
+      await commitBeforeDeadline(transaction, deadlineAt, signal);
       try {
         write.ledger.markSucceeded(entry.idempotencyKey, readBack);
       } catch {

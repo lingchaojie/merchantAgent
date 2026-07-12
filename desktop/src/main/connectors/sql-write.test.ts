@@ -305,6 +305,65 @@ describe("SQLServerAdapter transactional updates", () => {
     expect(fixture.transaction.rollback).not.toHaveBeenCalled();
   });
 
+  it("returns unknown promptly when commit never settles before the operation deadline", async () => {
+    const fixture = scriptedFixture([
+      readResult(before), { recordset: [], rowsAffected: [1] }, readResult(after),
+    ]);
+    fixture.transaction.commit.mockReturnValueOnce(new Promise(() => undefined));
+    const adapter = new SQLServerAdapter(profile(), vault(), fixture.pools, options());
+    const timedOperation = { ...operation(), timeoutMS: 50 };
+    const execution = adapter.executeConfirmedUpdate(
+      timedOperation, { ...args }, "k-commit-deadline",
+      { before, proposed: { completionRate: 60, note: "line stable", version: 5 } },
+    ).then(
+      () => "unexpected-success",
+      (error: { code?: string }) => error.code,
+    );
+
+    await expect(Promise.race([
+      execution,
+      new Promise<string>((resolve) => setTimeout(() => resolve("deadline"), 250)),
+    ])).resolves.toBe("unknown");
+    expect(ledger.get("k-commit-deadline")).toMatchObject({ status: "unknown" });
+    expect(fixture.transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  it("returns unknown on abort during commit and consumes a late commit rejection", async () => {
+    const fixture = scriptedFixture([
+      readResult(before), { recordset: [], rowsAffected: [1] }, readResult(after),
+    ]);
+    let rejectCommit!: (error: Error) => void;
+    fixture.transaction.commit.mockReturnValueOnce(new Promise((_resolve, reject) => {
+      rejectCommit = reject;
+    }));
+    const controller = new AbortController();
+    const adapter = new SQLServerAdapter(profile(), vault(), fixture.pools, options());
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown): void => { unhandled.push(error); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const execution = adapter.executeConfirmedUpdate(
+        operation(), { ...args }, "k-commit-abort",
+        { before, proposed: { completionRate: 60, note: "line stable", version: 5 } },
+        controller.signal,
+      );
+      await vi.waitFor(() => expect(fixture.transaction.commit).toHaveBeenCalledOnce());
+      controller.abort();
+
+      await expect(Promise.race([
+        execution.then(() => "unexpected-success", (error: { code?: string }) => error.code),
+        new Promise<string>((resolve) => setTimeout(() => resolve("deadline"), 250)),
+      ])).resolves.toBe("unknown");
+      rejectCommit(new Error("late commit rejection with secret detail"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+      expect(ledger.get("k-commit-abort")).toMatchObject({ status: "unknown" });
+      expect(fixture.transaction.rollback).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("does not retry a write after a transient-looking connection failure", async () => {
     const connectionError = Object.assign(new Error("socket timeout"), {
       name: "ConnectionError",

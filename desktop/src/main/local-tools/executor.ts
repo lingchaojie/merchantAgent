@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { ResumedUpdate, SQLServerAdapter, UpdatePreview } from "../connectors/sql-adapter";
+import type { SQLServerAdapter, UpdatePreview } from "../connectors/sql-adapter";
 import type { SQLUpdateOperation } from "../connectors/schema";
 import {
   LocalToolError,
@@ -129,6 +129,44 @@ function resumedErrorMetadata(error: unknown): { confirmedAt: string; before: Or
   return { confirmedAt, before: before as OrderStatus };
 }
 
+function sqlResumeArguments(
+  args: Record<string, unknown>,
+  operation: SQLUpdateOperation,
+): Readonly<Record<string, unknown>> {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    throw new LocalToolError("invalid_argument", "arguments must be an object");
+  }
+  const prototype = Object.getPrototypeOf(args);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new LocalToolError("invalid_argument", "arguments must be plain data");
+  }
+  const snapshot: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(args)) {
+    if (typeof key !== "string") throw new LocalToolError("invalid_argument", "argument names are invalid");
+    const descriptor = Object.getOwnPropertyDescriptor(args, key);
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      throw new LocalToolError("invalid_argument", "arguments must be plain data");
+    }
+    Object.defineProperty(snapshot, key, {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: descriptor.value,
+    });
+  }
+  const needsNextVersion = operation.bindings.some((binding) => binding.argument === "nextVersion");
+  if (needsNextVersion && !Object.prototype.hasOwnProperty.call(snapshot, "nextVersion")) {
+    const expectedVersion = snapshot.expectedVersion;
+    Object.defineProperty(snapshot, "nextVersion", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: Number.isSafeInteger(expectedVersion) ? (expectedVersion as number) + 1 : expectedVersion,
+    });
+  }
+  return Object.freeze(snapshot);
+}
+
 export class LocalToolExecutor {
   constructor(
     private readonly pkg: VerifiedPackage,
@@ -152,6 +190,28 @@ export class LocalToolExecutor {
         req.tool,
       );
       validateRequestMetadata(req, tool);
+      let resumedSQLArgs: Readonly<Record<string, unknown>> | undefined;
+      if (req.tool === "report_production_progress" && this.sqlUpdateRuntime !== undefined) {
+        resumedSQLArgs = sqlResumeArguments(req.args, this.sqlUpdateRuntime.operation);
+        const resumed = await this.sqlUpdateRuntime.adapter.resumeUpdate(
+          this.sqlUpdateRuntime.operation,
+          resumedSQLArgs,
+          req.idempotencyKey,
+        );
+        if (resumed !== null) {
+          return {
+            data: resumed.result as unknown as OrderStatus,
+            meta: {
+              ...base,
+              status: "succeeded",
+              confirmed: true,
+              confirmedAt: resumed.confirmedAt,
+              before: resumed.before as unknown as OrderStatus,
+              after: resumed.result as unknown as OrderStatus,
+            },
+          };
+        }
+      }
       tool.validate(req.args);
       switch (req.tool) {
         case "query_order_status": {
@@ -180,7 +240,8 @@ export class LocalToolExecutor {
           });
           base = { ...base, idempotencyKey: approvedRequest.idempotencyKey };
           if (this.sqlUpdateRuntime !== undefined) {
-            return await this.executeSQLProgress(approvedRequest, base, confirm);
+            if (resumedSQLArgs === undefined) throw new LocalDataSourceError("missing_datasource", "SQL arguments are unavailable");
+            return await this.executeSQLProgress(approvedRequest, resumedSQLArgs, base, confirm);
           }
           if (!this.store) {
             throw new LocalDataSourceError("missing_datasource", "local datasource is unavailable");
@@ -267,45 +328,12 @@ export class LocalToolExecutor {
       notePresent: boolean;
       note?: string;
     }>,
+    sqlArgs: Readonly<Record<string, unknown>>,
     base: { executionId: string; idempotencyKey: string; confirmed: boolean },
     confirm: Confirm,
   ): Promise<LocalToolResponse> {
     const runtime = this.sqlUpdateRuntime;
     if (runtime === undefined) throw new LocalDataSourceError("missing_datasource", "SQL runtime is unavailable");
-    const candidates: Record<string, unknown> = {
-      orderId: approvedRequest.orderId,
-      workOrderId: approvedRequest.workOrderId,
-      completionRate: approvedRequest.completionRate,
-      expectedVersion: approvedRequest.expectedVersion,
-      nextVersion: approvedRequest.expectedVersion + 1,
-      ...(approvedRequest.notePresent ? { note: approvedRequest.note } : {}),
-    };
-    const argumentNames = new Set(runtime.operation.bindings.map((binding) => binding.argument));
-    const sqlArgs: Record<string, unknown> = {};
-    for (const [name, value] of Object.entries(candidates)) {
-      if (argumentNames.has(name)) sqlArgs[name] = value;
-    }
-    Object.freeze(sqlArgs);
-
-    const resumed: ResumedUpdate | null = await runtime.adapter.resumeUpdate(
-      runtime.operation,
-      sqlArgs,
-      approvedRequest.idempotencyKey,
-    );
-    if (resumed !== null) {
-      return {
-        data: resumed.result as unknown as OrderStatus,
-        meta: {
-          ...base,
-          status: "succeeded",
-          confirmed: true,
-          confirmedAt: resumed.confirmedAt,
-          before: resumed.before as unknown as OrderStatus,
-          after: resumed.result as unknown as OrderStatus,
-        },
-      };
-    }
-
     const preview: UpdatePreview = await runtime.adapter.previewUpdate(runtime.operation, sqlArgs);
     if (preview.before.workOrderId !== approvedRequest.workOrderId) {
       throw new LocalToolError("source_conflict", "work order does not belong to the order");
