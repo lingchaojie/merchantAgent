@@ -108,12 +108,21 @@ export function ConnectorsPane({ client, onLifecycle }: { client: AdminClient; o
   const [connectors, setConnectors] = useState<ConnectorVersionView[]>([]);
   const [busyId, setBusyId] = useState("");
   const [staleIds, setStaleIds] = useState<Set<string>>(() => new Set());
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
 
+  const acceptFreshConnectors = useCallback((next: ConnectorVersionView[]) => {
+    setConnectors(next);
+    const freshIds = new Set(next.map((connector) => `${connector.connectorId}@${connector.version}`));
+    setStaleIds((current) => new Set([...current].filter((id) => !freshIds.has(id))));
+  }, []);
+
   const load = useCallback(async () => {
-    try { setConnectors(await client.listConnectors()); setError(""); }
+    setRefreshing(true);
+    try { acceptFreshConnectors(await client.listConnectors()); setError(""); }
     catch (e) { setError(String(e)); }
-  }, [client]);
+    finally { setRefreshing(false); }
+  }, [acceptFreshConnectors, client]);
   useEffect(() => { void load(); }, [load]);
 
   const action = async (connector: ConnectorVersionView, transition: ConnectorLifecycleAction) => {
@@ -123,10 +132,7 @@ export function ConnectorsPane({ client, onLifecycle }: { client: AdminClient; o
     try {
       const refreshed = await runConnectorLifecycleAction(client, connector, transition, onLifecycle);
       if (refreshed.connectors) {
-        setConnectors(refreshed.connectors);
-        setStaleIds((current) => {
-          const next = new Set(current); next.delete(id); return next;
-        });
+        acceptFreshConnectors(refreshed.connectors);
       }
       if (refreshed.errors.length > 0) setError(refreshed.errors.join("；"));
     } catch (e) {
@@ -142,6 +148,7 @@ export function ConnectorsPane({ client, onLifecycle }: { client: AdminClient; o
     <div className="pane connectors-pane">
       <h2 className="pane-title">连接器审批</h2>
       <p className="pane-caption">仅审核公开工具契约与校验摘要。本地实现配置不会显示在此处。</p>
+      <button className="btn" disabled={refreshing || Boolean(busyId)} onClick={() => void load()}>刷新连接器</button>
       {error && <div className="pane-err" role="alert">{error}</div>}
       {connectors.length === 0 && !error && <div className="connector-empty">暂无待审核或已发布的连接器。</div>}
       <div className="connector-list">{connectors.map((connector) => {

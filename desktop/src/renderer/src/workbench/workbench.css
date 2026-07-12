@@ -39,6 +39,7 @@
 .wb-ok { margin-left: 0; margin-right: 0; color: var(--green); background: var(--green-soft); }
 .wb-error { color: #f2a7a9; background: var(--red-soft); }
 .wb-result, .wb-write-preview, .wb-summary { margin: 16px 0; padding: 14px; border: 1px solid var(--border); border-radius: 7px; }
+.wb-result-context { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 10px; color: var(--text-secondary); font-size: 11px; }
 .wb-result-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .wb-result h4, .wb-write-preview h3, .wb-summary h3 { margin: 0 0 8px; color: var(--text-secondary); font-size: 12px; }
 .wb-sql-preview { display: block; padding: 8px; margin-bottom: 12px; border-radius: 5px; background: var(--bg-input); color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }

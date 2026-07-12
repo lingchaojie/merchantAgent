@@ -271,4 +271,40 @@ describe("WorkbenchApp workflow", () => {
     expect(first).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(second).not.toBe(first);
   });
+
+  it("keeps tested resource and environment context immutable after live draft edits", async () => {
+    const fixture = await mountedWorkbench();
+    await click(fixture.renderer.root, "2 操作定义");
+    await click(fixture.renderer.root, "report_production_progress");
+    await click(fixture.renderer.root, "3 测试与提交");
+    await click(fixture.renderer.root, "运行测试");
+
+    let preview = fixture.renderer.root.findByProps({ "aria-label": "本地测试结果" });
+    expect(nodeText(preview)).toContain("环境 · test");
+    expect(nodeText(preview)).toContain("资源 · ORD-1001 / WO-1001");
+
+    await change(fixture.renderer.root, "orderId", "ORD-CHANGED");
+    await change(fixture.renderer.root, "workOrderId", "WO-CHANGED");
+    await click(fixture.renderer.root, "1 连接配置");
+    await click(fixture.renderer.root, "预生产");
+    await click(fixture.renderer.root, "3 测试与提交");
+
+    preview = fixture.renderer.root.findByProps({ "aria-label": "本地测试结果" });
+    expect(nodeText(preview)).toContain("环境 · test");
+    expect(nodeText(preview)).toContain("资源 · ORD-1001 / WO-1001");
+    expect(nodeText(preview)).not.toContain("ORD-CHANGED");
+    expect(nodeText(preview)).not.toContain("WO-CHANGED");
+    expect(nodeText(preview)).not.toContain("preproduction");
+  });
+
+  it("associates the selected Workbench tab with its panel", async () => {
+    const fixture = await mountedWorkbench();
+    const tablist = fixture.renderer.root.findByProps({ role: "tablist" });
+    expect(tablist.props["aria-label"]).toBe("工作台步骤");
+    const selected = fixture.renderer.root.findAllByProps({ role: "tab" })
+      .find((candidate) => candidate.props["aria-selected"] === true)!;
+    const panel = fixture.renderer.root.findByProps({ role: "tabpanel" });
+    expect(selected.props["aria-controls"]).toBe(panel.props.id);
+    expect(panel.props["aria-labelledby"]).toBe(selected.props.id);
+  });
 });

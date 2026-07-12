@@ -60,6 +60,8 @@ interface DisplayedResult {
   sql: string;
   args: Record<string, unknown>;
   draftId: string;
+  environment: WorkbenchEnvironment;
+  resource: string;
 }
 
 function JsonValue({ value }: { value: unknown }): JSX.Element {
@@ -67,12 +69,14 @@ function JsonValue({ value }: { value: unknown }): JSX.Element {
 }
 
 export function WorkbenchOperationResult({
-  sql, result, tool = "query_order_status", draftId, onClose,
+  sql, result, tool = "query_order_status", draftId, environment, resource, onClose,
 }: {
   sql: string;
   result: WorkbenchTestResultView;
   tool?: ToolName;
   draftId?: string;
+  environment?: WorkbenchEnvironment;
+  resource?: string;
   onClose: () => void;
 }): JSX.Element {
   const write = tool === "report_production_progress";
@@ -85,6 +89,10 @@ export function WorkbenchOperationResult({
         </div>
         <button className="wb-btn" onClick={onClose}>关闭测试结果</button>
       </div>
+      {(environment || resource) && <div className="wb-result-context">
+        {environment && <span>环境 · {environment}</span>}
+        {resource && <span>资源 · {resource}</span>}
+      </div>}
       <code className="wb-sql-preview">{sql}</code>
       <div className="wb-result-grid">
         <div><h4>{write ? "实际变更前" : "原始行"}</h4><JsonValue value={result.raw} /></div>
@@ -201,8 +209,8 @@ export function WorkbenchApp({ api }: { api: WorkbenchAPI }): JSX.Element {
 
   const invalidateDraftState = useCallback(() => {
     setConnection(null); setEvidence({ draftKey: "", operations: {} }); setSummary(null); setFrozen(null);
-    setSubmitStatus(""); setSavedDraftId(null); void closeResult("草稿已更改");
-  }, [closeResult]);
+    setSubmitStatus(""); setSavedDraftId(null);
+  }, []);
 
   const updateProfile = <K extends keyof ProfileForm>(key: K, value: ProfileForm[K]) => {
     invalidateDraftState(); setProfile((current) => ({ ...current, [key]: value }));
@@ -259,9 +267,10 @@ export function WorkbenchApp({ api }: { api: WorkbenchAPI }): JSX.Element {
         <div className="wb-session"><span>{session.tenantId}</span><span>有效期至 {new Date(session.expiresAt).toLocaleTimeString()}</span>
           <button className="wb-btn" disabled={busy} onClick={() => run(lock)}>锁定</button></div>
       </header>
-      <nav className="wb-tabs" aria-label="工作台步骤">
+      <nav className="wb-tabs" role="tablist" aria-label="工作台步骤">
         {(["profile", "operations", "tests"] as Tab[]).map((id) => (
-          <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
+          <button key={id} id={`wb-tab-${id}`} role="tab" aria-selected={tab === id} aria-controls={`wb-panel-${id}`}
+            tabIndex={tab === id ? 0 : -1} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
             {id === "profile" ? "1 连接配置" : id === "operations" ? "2 操作定义" : "3 测试与提交"}
           </button>
         ))}
@@ -269,7 +278,7 @@ export function WorkbenchApp({ api }: { api: WorkbenchAPI }): JSX.Element {
       {error && <div className="wb-error" role="alert">{error}</div>}
 
       <div className="wb-content">
-        {tab === "profile" && <section className="wb-panel">
+        {tab === "profile" && <section className="wb-panel" id="wb-panel-profile" role="tabpanel" aria-labelledby="wb-tab-profile">
           <div className="wb-section-head"><div><h2>SQL Server 配置</h2><p>凭据为只写；保存后无法从工作台读取。</p></div></div>
           <div className="wb-segment" aria-label="目标环境">
             {(["test", "preproduction"] as WorkbenchEnvironment[]).map((env) => <button key={env}
@@ -298,7 +307,7 @@ export function WorkbenchApp({ api }: { api: WorkbenchAPI }): JSX.Element {
           </div>
         </section>}
 
-        {tab === "operations" && <section className="wb-panel">
+        {tab === "operations" && <section className="wb-panel" id="wb-panel-operations" role="tabpanel" aria-labelledby="wb-tab-operations">
           <div className="wb-section-head"><div><h2>固定操作定义</h2><p>仅支持 query_order_status 与 report_production_progress。</p></div></div>
           <div className="wb-operation-switch">
             <button className={tool === "query_order_status" ? "active" : ""} aria-pressed={tool === "query_order_status"} onClick={() => selectTool("query_order_status")}>query_order_status</button>
@@ -317,7 +326,7 @@ export function WorkbenchApp({ api }: { api: WorkbenchAPI }): JSX.Element {
           })}>保存草稿</button>
         </section>}
 
-        {tab === "tests" && <section className="wb-panel">
+        {tab === "tests" && <section className="wb-panel" id="wb-panel-tests" role="tabpanel" aria-labelledby="wb-tab-tests">
           <div className="wb-section-head"><div><h2>本地测试与提交</h2><p>冻结后仅提交公开契约与校验摘要。</p></div><code>{draftId}</code></div>
           <div className="wb-test-actions">
             <button className="wb-btn" disabled={busy} onClick={() => run(async () => {
@@ -333,8 +342,14 @@ export function WorkbenchApp({ api }: { api: WorkbenchAPI }): JSX.Element {
               const saved = await persistDraft(); if (!saved) return;
               const args = operationArgs(tool, form);
               const sql = operationSQL(tool, profile, form);
+              const resource = tool === "report_production_progress"
+                ? `${String(args.orderId)} / ${String(args.workOrderId)}`
+                : String(args.orderId);
               const tested = await api.testOperation(session.sessionId, saved.draftId, tool, args);
-              const snapshot: DisplayedResult = { result: tested, tool, sql, args: { ...args }, draftId: saved.draftId };
+              const snapshot: DisplayedResult = {
+                result: tested, tool, sql, args: { ...args }, draftId: saved.draftId,
+                environment: profile.environment, resource,
+              };
               resultRef.current = snapshot; setResult(snapshot);
               setEvidence((current) => {
                 const base = current.draftKey === draftKey ? current : { draftKey, operations: {} };
@@ -358,6 +373,7 @@ export function WorkbenchApp({ api }: { api: WorkbenchAPI }): JSX.Element {
             </>}
           </div>
           {result && <WorkbenchOperationResult sql={result.sql} result={result.result} tool={result.tool} draftId={result.draftId}
+            environment={result.environment} resource={result.resource}
             onClose={() => closeResult("用户关闭测试结果")} />}
           <div className="wb-freeze-actions">
             <button className="wb-btn" disabled={busy || !profile.server || !profile.database || !evidenceComplete(evidence, draftKey)} onClick={() => run(async () => {

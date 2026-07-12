@@ -149,3 +149,36 @@ it("confirms revoke before transitioning and refreshes both registries", async (
   expect(client.listConnectors).toHaveBeenCalledTimes(2);
   expect(client.listTools).toHaveBeenCalledOnce();
 });
+
+it("recovers a stale disabled connector after a later successful pane refresh", async () => {
+  const connector = pendingContract();
+  const published = { ...connector, status: "published" as const, approvedBy: "admin-1" };
+  const client = {
+    listConnectors: vi.fn()
+      .mockResolvedValueOnce([connector])
+      .mockRejectedValueOnce(new Error("connector reload failed"))
+      .mockResolvedValueOnce([published]),
+    listTools: vi.fn(async () => []),
+    publishConnector: vi.fn(async () => undefined),
+  } as unknown as AdminClient;
+  const onLifecycle = vi.fn();
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<ConnectorsPane client={client} onLifecycle={onLifecycle} />); });
+  await flush();
+
+  const publish = renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "发布")!;
+  await act(async () => { publish.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+  await flush();
+  expect(publish.props.disabled).toBe(true);
+  expect(onLifecycle).toHaveBeenCalledOnce();
+
+  const refresh = renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "刷新连接器")!;
+  await act(async () => { refresh.props.onClick(); await Promise.resolve(); });
+  await flush();
+
+  expect(nodeText(renderer.root)).not.toContain("connector reload failed");
+  expect(renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "暂停")?.props.disabled).toBe(false);
+});

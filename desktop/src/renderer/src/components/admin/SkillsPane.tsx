@@ -7,6 +7,7 @@ interface SkillEditorProps {
   originalAllowedTools?: string[];
   isNew: boolean;
   busy: boolean;
+  toolsFresh?: boolean;
   tools: ToolInfo[];
   roles: Role[];
   domains: Domain[];
@@ -37,6 +38,7 @@ export function SkillEditor({
   originalAllowedTools = skill.allowedTools,
   isNew,
   busy,
+  toolsFresh = true,
   tools,
   roles,
   domains,
@@ -72,7 +74,7 @@ export function SkillEditor({
       <fieldset><legend>工具</legend>
         {tools.map((tool) => (
           <label key={tool.name} className="chk tool-choice">
-            <input type="checkbox" checked={skill.allowedTools.includes(tool.name)} disabled={busy}
+            <input type="checkbox" checked={skill.allowedTools.includes(tool.name)} disabled={busy || !toolsFresh}
               onChange={() => update("allowedTools", toggle(skill.allowedTools, tool.name))} />
             <span className="tool-choice-details">
               <span>{tool.name}{tool.dataDomain ? <span className="warn"> ⚠ {tool.dataDomain}</span> : null}</span>
@@ -114,7 +116,7 @@ export function SkillEditor({
         ))}
       </fieldset>
       <div className="pane-form">
-        <button className="btn-primary" disabled={busy || !skill.skillId.trim() || !skill.name.trim() || invalidTools.length > 0}
+        <button className="btn-primary" disabled={busy || !toolsFresh || !skill.skillId.trim() || !skill.name.trim() || invalidTools.length > 0}
           onClick={onSave}>保存</button>
         <button className="btn" disabled={busy} onClick={onCancel}>取消</button>
       </div>
@@ -133,12 +135,13 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
   const [isNew, setIsNew] = useState(false);
   const [originalAllowedTools, setOriginalAllowedTools] = useState<string[]>([]);
   const [toolsFresh, setToolsFresh] = useState(false);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [ok, setOk] = useState("");
 
   const load = useCallback(async () => {
-    setToolsFresh(false);
+    setCatalogLoading(true); setToolsFresh(false); setTools([]); setErr("");
     try {
       const [nextSkills, nextTools, nextRoles, nextTemplates, domainData] = await Promise.all([
         client.listSkills(), client.listTools(), client.listRoles(), client.listTemplates(), client.listDomains(),
@@ -148,6 +151,8 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
       setToolsFresh(true);
     } catch (error) {
       setErr(String(error));
+    } finally {
+      setCatalogLoading(false);
     }
   }, [client]);
 
@@ -155,6 +160,10 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
 
   const save = async () => {
     if (!edit) return;
+    if (!toolsFresh) {
+      setErr("实时工具目录不可用，无法保存技能");
+      return;
+    }
     const invalid = unavailableToolReferences(edit.allowedTools, originalAllowedTools, tools);
     if (invalid.length > 0) {
       setErr(`不可保存未发布工具：${invalid.join("、")}`);
@@ -217,6 +226,10 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
       <h3 className="pane-title">技能</h3>
       {err && <div className="pane-err" role="alert">{err}</div>}
       {ok && <div className="pane-ok" role="status">{ok}</div>}
+      <div className="pane-form" role="status">
+        <span>{catalogLoading ? "正在刷新实时工具目录…" : toolsFresh ? "实时工具目录已刷新" : "实时工具目录不可用，新增、保存与克隆已禁用"}</span>
+        <button className="btn" disabled={busy || catalogLoading} onClick={() => void load()}>刷新工具目录</button>
+      </div>
       <div className="pane-form skill-create-actions">
         <button className="btn" disabled={busy || edit !== null}
           onClick={() => { setEdit(newSkillDraft(tenantId)); setOriginalAllowedTools([]); setIsNew(true); }}>新建空白技能</button>
@@ -245,7 +258,7 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
         ))}
       </ul>
       {edit && (
-        <SkillEditor skill={edit} originalAllowedTools={originalAllowedTools} isNew={isNew} busy={busy} tools={tools} roles={roles} domains={domains}
+        <SkillEditor skill={edit} originalAllowedTools={originalAllowedTools} isNew={isNew} busy={busy} toolsFresh={toolsFresh} tools={tools} roles={roles} domains={domains}
           onChange={setEdit} onSave={() => void save()}
           onCancel={() => { setEdit(null); setIsNew(false); }} />
       )}
