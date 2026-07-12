@@ -11,7 +11,8 @@
 - 销售问自己订单的**进度** → ✅；问**利润/成本** → ⛔（被 cost 数据域过滤）
 - 销售经理问本部门订单利润 → ✅（`d_sales` 的 manager）
 - 老板问任意订单利润 → ✅（`d_root` manager 向下继承）
-- 计划员问销售部订单 → ⛔（不在该部门，`ListObjects` 预过滤为空）
+- 计划员可读取参考订单，并对拥有 `operator` 关系的 `SO-1001` 发起本地确认写 → ✅
+- 只有 `viewer`、没有 `operator` 的调用者可读订单，但不能写生产进度 → ⛔
 - 会计可看 cost 数据域 → ✅
 
 ## 结构
@@ -27,7 +28,7 @@ backend/
 │  ├─ tuples.go          #   OrgSnapshot → OpenFGA 元组
 │  └─ reconcile.go       #   desired vs current 的幂等 diff
 ├─ authz/                # OpenFGA 封装 + 同步编排
-│  ├─ model.fga          #   授权模型 DSL（tenant/dept/role/data_domain/agent/tool/order）
+│  ├─ model.fga          #   授权模型 DSL（tenant/dept/role/data_domain/agent/tool/business_record）
 │  ├─ store.go           #   建 store、写模型、Check / ListObjects / ApplyDiff
 │  ├─ syncer.go          #   FetchSnapshot → tuples → reconcile → apply（Seed）
 │  └─ *_test.go          #   6 个验收用例 + ListObjects 预过滤
@@ -41,7 +42,7 @@ backend/
 │  └─ mockerp/           #   mock ERP: query_order_status / query_order_financials(cost域) / check_material_kitting
 ├─ runtime/              # 确定性 Agent 循环
 │  ├─ agent.go           #   IntentRouter(KeywordRouter) + Ask: 路由→授权→调工具→组织回答
-│  ├─ guard.go           #   §6.1 授权中间件: 记录级 viewer ∧ 数据域 viewer 取交集(agent≤用户)
+│  ├─ guard.go           #   §6.1 授权中间件: Skill ∧ 声明的记录关系(默认 viewer) ∧ 数据域
 │  └─ audit.go           #   哈希链审计日志(可验证/防篡改)
 ├─ e2e/                  # 组合根测试: 真 OpenFGA + mock ERP + runtime 复现"同问不同权"
 └─ cmd/
@@ -80,10 +81,12 @@ go test ./...                  # 验收用例连不上 OpenFGA 会自动 skip，
 
 agentd 注册 `connector/clientexec` 的桌面代理工具。通过 `/chat` 触发时，服务端先执行 Skill/OpenFGA/记录级门禁，再用 SSE 发 `local_tool_request`；Windows 主进程验证签名 capability 并执行参考 SQLite，随后 POST `/chat/local-tool-result`。服务端只把字段 allowlist 反馈给模型，并把角色快照、设备、决策、终态、幂等键、确认时间和 before/after 写入租户哈希链。
 
+订单记录使用行业无关的 `business_record:<tenant>/order/<id>`。每个工具声明所需记录关系：未声明时默认为 `viewer`，`report_production_progress` 显式要求 `operator`；这与 Skill/tool invoker 和可选数据域检查共同构成执行门禁。
+
 参考工具只有：
 
 - `query_order_status`：desktop/read，不含成本、SQL、路径或凭据。
-- `report_production_progress`：desktop/low_write，必须确认，使用乐观版本、幂等键和写后校验。
+- `report_production_progress`：desktop/low_write，模型可在展示变更预览后调用；特权桌面客户端在执行内部请求确认，并使用乐观版本、绑定请求指纹的持久幂等键和写后校验。
 
 确定性竖切：
 

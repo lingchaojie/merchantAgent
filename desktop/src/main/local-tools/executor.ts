@@ -141,6 +141,7 @@ export class LocalToolExecutor {
           return { data, meta: { ...base, status: "succeeded" } };
         }
         case "report_production_progress": {
+          const notePresent = Object.prototype.hasOwnProperty.call(req.args, "note");
           const approvedRequest = Object.freeze({
             tenantId: req.tenantId,
             userId: req.userId,
@@ -153,7 +154,8 @@ export class LocalToolExecutor {
             workOrderId: String(req.args.workOrderId),
             completionRate: Number(req.args.completionRate),
             expectedVersion: Number(req.args.expectedVersion),
-            note: String(req.args.note ?? ""),
+            notePresent,
+            note: notePresent ? String(req.args.note) : undefined,
           });
           base = { ...base, idempotencyKey: approvedRequest.idempotencyKey };
           const before = this.store.queryOrderStatus(approvedRequest.orderId);
@@ -166,7 +168,7 @@ export class LocalToolExecutor {
             before,
             proposed: {
               completionRate: approvedRequest.completionRate,
-              note: approvedRequest.note,
+              note: approvedRequest.notePresent ? approvedRequest.note! : before.note,
             },
           });
           if (!approved) {
@@ -176,14 +178,15 @@ export class LocalToolExecutor {
             };
           }
           const confirmedAt = new Date().toISOString();
-          const written = this.store.reportProductionProgress({
+          const writeInput: ProductionProgressInput = {
             orderId: approvedRequest.orderId,
             workOrderId: approvedRequest.workOrderId,
             completionRate: approvedRequest.completionRate,
             expectedVersion: approvedRequest.expectedVersion,
-            note: approvedRequest.note,
             idempotencyKey: approvedRequest.idempotencyKey,
-          });
+            ...(approvedRequest.notePresent ? { note: approvedRequest.note! } : {}),
+          };
+          const written = this.store.reportProductionProgress(writeInput);
           return {
             data: written.data,
             meta: {

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import Database from "better-sqlite3";
 
 const REPORT_PROGRESS_TOOL = "report_production_progress";
@@ -51,6 +52,7 @@ interface OrderStatusRow {
 
 interface IdempotencyRow {
   tool_name: string;
+  request_fingerprint: string | null;
   result_json: string;
 }
 
@@ -67,12 +69,40 @@ function toOrderStatus(row: OrderStatusRow): OrderStatus {
 }
 
 function requireValidProgress(input: ProductionProgressInput): void {
+  if (typeof input.orderId !== "string" || input.orderId.length === 0) {
+    throw new ReferenceEnterpriseStoreError("invalid_argument", "orderId is required");
+  }
+  if (typeof input.workOrderId !== "string" || input.workOrderId.length === 0) {
+    throw new ReferenceEnterpriseStoreError("invalid_argument", "workOrderId is required");
+  }
   if (!Number.isInteger(input.completionRate) || input.completionRate < 0 || input.completionRate > 100) {
     throw new ReferenceEnterpriseStoreError(
       "invalid_argument",
       "completionRate must be an integer from 0 through 100",
     );
   }
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) {
+    throw new ReferenceEnterpriseStoreError("invalid_argument", "expectedVersion must be a non-negative integer");
+  }
+  if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.length === 0) {
+    throw new ReferenceEnterpriseStoreError("invalid_argument", "idempotencyKey is required");
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "note") && typeof input.note !== "string") {
+    throw new ReferenceEnterpriseStoreError("invalid_argument", "note must be a string when provided");
+  }
+}
+
+function progressRequestFingerprint(input: ProductionProgressInput): string {
+  const notePresent = Object.prototype.hasOwnProperty.call(input, "note");
+  const canonical = JSON.stringify({
+    tool: REPORT_PROGRESS_TOOL,
+    orderId: input.orderId,
+    workOrderId: input.workOrderId,
+    completionRate: input.completionRate,
+    expectedVersion: input.expectedVersion,
+    note: notePresent ? { present: true, value: input.note } : { present: false },
+  });
+  return `sha256:${crypto.createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
 export class ReferenceEnterpriseStore {
@@ -100,20 +130,27 @@ export class ReferenceEnterpriseStore {
 
   reportProductionProgress(input: ProductionProgressInput): ProductionProgressResult {
     const write = this.database.transaction((): ProductionProgressResult => {
+      requireValidProgress(input);
+      const requestFingerprint = progressRequestFingerprint(input);
       const idempotent = this.database
-        .prepare("SELECT tool_name, result_json FROM tool_idempotency WHERE idempotency_key = ?")
+        .prepare(
+          "SELECT tool_name, request_fingerprint, result_json FROM tool_idempotency WHERE idempotency_key = ?",
+        )
         .get(input.idempotencyKey) as IdempotencyRow | undefined;
       if (idempotent) {
-        if (idempotent.tool_name !== REPORT_PROGRESS_TOOL) {
+        if (
+          idempotent.tool_name !== REPORT_PROGRESS_TOOL ||
+          idempotent.request_fingerprint === null ||
+          idempotent.request_fingerprint !== requestFingerprint
+        ) {
           throw new ReferenceEnterpriseStoreError(
             "source_conflict",
-            "idempotency key belongs to a different tool",
+            "idempotency key is not bound to this request",
           );
         }
         return JSON.parse(idempotent.result_json) as ProductionProgressResult;
       }
 
-      requireValidProgress(input);
       const currentRow = this.selectOrderStatus(input.orderId, input.workOrderId);
       if (!currentRow || currentRow.version !== input.expectedVersion) {
         throw new ReferenceEnterpriseStoreError(
@@ -141,9 +178,17 @@ export class ReferenceEnterpriseStore {
 
       this.database
         .prepare(
-          "INSERT INTO tool_idempotency (idempotency_key, tool_name, result_json, created_at) VALUES (?, ?, ?, ?)",
+          `INSERT INTO tool_idempotency
+             (idempotency_key, tool_name, request_fingerprint, result_json, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
         )
-        .run(input.idempotencyKey, REPORT_PROGRESS_TOOL, JSON.stringify(result), new Date().toISOString());
+        .run(
+          input.idempotencyKey,
+          REPORT_PROGRESS_TOOL,
+          requestFingerprint,
+          JSON.stringify(result),
+          new Date().toISOString(),
+        );
       return result;
     });
 
@@ -170,10 +215,18 @@ export class ReferenceEnterpriseStore {
       CREATE TABLE IF NOT EXISTS tool_idempotency (
         idempotency_key TEXT PRIMARY KEY,
         tool_name TEXT NOT NULL,
+        request_fingerprint TEXT,
         result_json TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
     `);
+
+    const idempotencyColumns = this.database.pragma("table_info(tool_idempotency)") as Array<{
+      name: string;
+    }>;
+    if (!idempotencyColumns.some((column) => column.name === "request_fingerprint")) {
+      this.database.exec("ALTER TABLE tool_idempotency ADD COLUMN request_fingerprint TEXT");
+    }
 
     const seed = this.database.transaction(() => {
       const order = this.database.prepare("SELECT order_id FROM orders WHERE order_id = ?").get("SO-1001");

@@ -62,11 +62,15 @@ func TestOpenFileAppliesLocalToolMigrationOnce(t *testing.T) {
 			"2. Pass the returned version",
 			"expectedVersion",
 			"3. Summarize the proposed",
-			"4. Call report_production_progress only after the client confirmation gate",
+			"4. Call report_production_progress to request execution",
+			"privileged desktop client asks for confirmation inside tool execution",
 		} {
 			if !strings.Contains(sk.PlaybookMD, marker) {
 				t.Fatalf("production-progress playbook missing %q: %s", marker, sk.PlaybookMD)
 			}
+		}
+		if strings.Contains(sk.PlaybookMD, "only after the client confirmation gate") {
+			t.Fatalf("production-progress playbook requires confirmation before tool execution: %s", sk.PlaybookMD)
 		}
 	}
 	if err := s.Delete(context.Background(), "mock-corp-001", "production-progress"); err != nil {

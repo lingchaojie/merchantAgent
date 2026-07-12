@@ -287,14 +287,14 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 
 	name := tc.Function.Name
 	sink.emit(Event{Kind: "tool_call", Tool: name})
+	installedTool, installed := a.tools[name]
 	args := map[string]any{}
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil || args == nil {
-		if tool, found := a.tools[name]; found {
-			if skillID, unlocked := unlockedBy[name]; unlocked && skillID != "" {
-				spec := tool.Spec()
-				_ = a.record(p, spec, nil, Decision{Allowed: false, Reason: "invalid tool arguments JSON"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
-				a.emitToolState(sink, spec, name, "failed")
-			}
+		if installed {
+			skillID := unlockedBy[name]
+			spec := installedTool.Spec()
+			_ = a.record(p, spec, nil, Decision{Allowed: false, Reason: "invalid tool arguments JSON"}, skillID, tc.ID, turn, "failed", connector.ExecutionMeta{})
+			a.emitToolState(sink, spec, name, "failed")
 		}
 		return "工具参数无效：JSON 格式错误"
 	}
@@ -339,7 +339,7 @@ func (a *LLMAgent) dispatch(ctx context.Context, p org.Principal, tc provider.To
 	}
 
 	// A connector tool. Must be unlocked by a loaded skill first.
-	tool, found := a.tools[name]
+	tool, found := installedTool, installed
 	skillID, unlocked := unlockedBy[name]
 	if !found {
 		return fmt.Sprintf("工具 %q 尚未通过技能解锁或不存在。", name)

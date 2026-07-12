@@ -168,6 +168,38 @@ describe("LocalToolExecutor", () => {
     expect(store.queryOrderStatus("SO-1001").version).toBe(2);
   });
 
+  it("keeps omitted note distinct from an explicitly empty note for idempotency", async () => {
+    const original = store.queryOrderStatus("SO-1001");
+    const withoutNote = progressRequest({
+      args: {
+        orderId: "SO-1001",
+        workOrderId: "WO-1001",
+        completionRate: 80,
+        expectedVersion: 1,
+      },
+    });
+    const first = await executor.execute(withoutNote, async () => true);
+    const changed = await executor.execute(
+      progressRequest({
+        args: {
+          orderId: "SO-1001",
+          workOrderId: "WO-1001",
+          completionRate: 80,
+          expectedVersion: 1,
+          note: "",
+        },
+      }),
+      async () => true,
+    );
+
+    expect(first).toMatchObject({
+      data: { note: original.note, version: 2 },
+      meta: { status: "succeeded" },
+    });
+    expect(changed).toMatchObject({ error: "source_conflict", meta: { status: "source_conflict" } });
+    expect(store.queryOrderStatus("SO-1001")).toMatchObject({ note: original.note, version: 2 });
+  });
+
   it.each([
     ["unknown tool", { tool: "execute_sql" }, "tool_not_installed"],
     ["mismatched version", { packageVersion: "2.0.0" }, "package_version"],

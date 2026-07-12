@@ -7,7 +7,7 @@ VALUES
    '["query_order_status"]', '[]', '["sales","planner","manager_tier"]'),
   ('production-progress', 'Production Progress',
    'Review and report local production progress with optimistic concurrency.',
-   '1. Call query_order_status for the requested order first.\n2. Pass the returned version to report_production_progress as expectedVersion.\n3. Summarize the proposed completion rate, work order, and note for the client.\n4. Call report_production_progress only after the client confirmation gate authorizes the write. Never call the write tool before that confirmation.',
+   '1. Call query_order_status for the requested order first.\n2. Pass the returned version to report_production_progress as expectedVersion.\n3. Summarize the proposed completion rate, work order, and note for the client.\n4. Call report_production_progress to request execution. The privileged desktop client asks for confirmation inside tool execution; if the user declines, report the cancellation. Do not claim success until the tool returns a verified result.',
    '["query_order_status","report_production_progress"]', '[]', '["planner","manager_tier"]');
 
 INSERT OR IGNORE INTO skills
@@ -19,5 +19,5 @@ VALUES
    '["query_order_status"]', '[]', '["sales","planner","manager_tier"]', 'order-status'),
   ('mock-corp-001', 'production-progress', 'Production Progress',
    'Review and report local production progress with optimistic concurrency.',
-   '1. Call query_order_status for the requested order first.\n2. Pass the returned version to report_production_progress as expectedVersion.\n3. Summarize the proposed completion rate, work order, and note for the client.\n4. Call report_production_progress only after the client confirmation gate authorizes the write. Never call the write tool before that confirmation.',
+   '1. Call query_order_status for the requested order first.\n2. Pass the returned version to report_production_progress as expectedVersion.\n3. Summarize the proposed completion rate, work order, and note for the client.\n4. Call report_production_progress to request execution. The privileged desktop client asks for confirmation inside tool execution; if the user declines, report the cancellation. Do not claim success until the tool returns a verified result.',
    '["query_order_status","report_production_progress"]', '[]', '["planner","manager_tier"]', 'production-progress');

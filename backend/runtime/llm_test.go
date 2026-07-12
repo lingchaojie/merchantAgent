@@ -761,6 +761,69 @@ func TestLLM_AuditsInstalledToolBlockedBySkillGate(t *testing.T) {
 	}
 }
 
+func TestDispatchAuditsMalformedInstalledToolBeforeSkillUnlock(t *testing.T) {
+	for _, arguments := range []string{"{", "null"} {
+		t.Run(arguments, func(t *testing.T) {
+			tool := &countingTool{spec: connector.ToolSpec{
+				PackageID: "reference-manufacturing", Version: "1.0.0",
+				Name: "desktop_tool", Execution: connector.ExecutionDesktop, Risk: connector.RiskLowWrite,
+			}}
+			audit := NewAuditLog()
+			agent := &LLMAgent{tools: map[string]connector.Tool{"desktop_tool": tool}, audit: audit}
+
+			result := agent.dispatch(
+				context.Background(), org.Principal{TenantID: "t", UserID: "u1"},
+				provider.ToolCall{ID: "locked-call", Type: "function", Function: provider.FunctionCall{Name: "desktop_tool", Arguments: arguments}},
+				nil, map[string]string{}, &[]provider.ToolDef{},
+				turnMeta{RoleIDs: []string{"planner"}, DeviceID: "DESKTOP-01"}, nil,
+			)
+
+			if !strings.Contains(result, "JSON") {
+				t.Fatalf("result = %q, want malformed JSON error", result)
+			}
+			if tool.invocations != 0 {
+				t.Fatalf("installed locked tool invoked %d times, want 0", tool.invocations)
+			}
+			entries := audit.Entries()
+			if len(entries) != 1 {
+				t.Fatalf("audit = %+v, want exactly one terminal entry", entries)
+			}
+			e := entries[0]
+			if e.ToolCallID != "locked-call" || e.Decision != "deny" || e.Status != "failed" ||
+				e.Tool != "desktop_tool" || e.ToolVersion != "1.0.0" || e.ExecutionLocation != "desktop" ||
+				e.Risk != "low_write" || e.DeviceID != "DESKTOP-01" || !reflect.DeepEqual(e.RoleIDs, []string{"planner"}) {
+				t.Fatalf("terminal audit attribution = %+v", e)
+			}
+			if !audit.Verify() {
+				t.Fatal("terminal audit chain did not verify")
+			}
+		})
+	}
+}
+
+func TestDispatchDoesNotAuditUnknownToolWithMalformedArguments(t *testing.T) {
+	for _, arguments := range []string{"{", "null"} {
+		t.Run(arguments, func(t *testing.T) {
+			installed := &countingTool{spec: connector.ToolSpec{Name: "desktop_tool"}}
+			audit := NewAuditLog()
+			agent := &LLMAgent{tools: map[string]connector.Tool{"desktop_tool": installed}, audit: audit}
+
+			agent.dispatch(
+				context.Background(), org.Principal{TenantID: "t", UserID: "u1"},
+				provider.ToolCall{ID: "unknown-call", Type: "function", Function: provider.FunctionCall{Name: "execute_sql", Arguments: arguments}},
+				nil, map[string]string{}, &[]provider.ToolDef{}, turnMeta{}, nil,
+			)
+
+			if installed.invocations != 0 {
+				t.Fatalf("installed tool invoked %d times, want 0", installed.invocations)
+			}
+			if entries := audit.Entries(); len(entries) != 0 {
+				t.Fatalf("unknown tool was audited: %+v", entries)
+			}
+		})
+	}
+}
+
 func hasTool(defs []provider.ToolDef, name string) bool {
 	for _, d := range defs {
 		if d.Function.Name == name {

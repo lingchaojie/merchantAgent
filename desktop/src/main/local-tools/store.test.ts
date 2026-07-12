@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ReferenceEnterpriseStore,
@@ -72,6 +73,88 @@ describe("ReferenceEnterpriseStore", () => {
     expect(first).toEqual({ data: expectedAfter, before: initialStatus, after: expectedAfter });
     expect(second).toEqual(first);
     expect(store.queryOrderStatus("SO-1001").version).toBe(2);
+  });
+
+  it("rejects reuse of an idempotency key with different approved write semantics", () => {
+    store.reportProductionProgress(progressInput);
+    const { note: _note, ...withoutNote } = progressInput;
+
+    for (const changed of [
+      { ...progressInput, completionRate: 81 },
+      withoutNote,
+    ]) {
+      expectStoreError(() => store.reportProductionProgress(changed), "source_conflict");
+    }
+
+    expect(store.queryOrderStatus("SO-1001")).toMatchObject({
+      completionRate: 80,
+      note: progressInput.note,
+      version: 2,
+    });
+  });
+
+  it("replays the exact stored result after close and reopen without incrementing version", () => {
+    const first = store.reportProductionProgress(progressInput);
+    store.close();
+    store = new ReferenceEnterpriseStore(databasePath);
+
+    const replay = store.reportProductionProgress(progressInput);
+
+    expect(replay).toEqual(first);
+    expect(store.queryOrderStatus("SO-1001").version).toBe(2);
+  });
+
+  it("rejects changed arguments for a persisted idempotency key after reopen", () => {
+    store.reportProductionProgress(progressInput);
+    store.close();
+    store = new ReferenceEnterpriseStore(databasePath);
+
+    expectStoreError(
+      () => store.reportProductionProgress({ ...progressInput, expectedVersion: 2 }),
+      "source_conflict",
+    );
+    expect(store.queryOrderStatus("SO-1001").version).toBe(2);
+  });
+
+  it("upgrades a legacy idempotency table and fails closed for rows without a fingerprint", () => {
+    store.close();
+    fs.rmSync(databasePath, { force: true });
+    const legacy = new Database(databasePath);
+    legacy.exec(`
+      CREATE TABLE orders (
+        order_id TEXT PRIMARY KEY, status TEXT NOT NULL, promise_date TEXT NOT NULL,
+        cost INTEGER NOT NULL, price INTEGER NOT NULL
+      );
+      CREATE TABLE work_orders (
+        work_order_id TEXT PRIMARY KEY, order_id TEXT NOT NULL UNIQUE,
+        completion_rate INTEGER NOT NULL, note TEXT NOT NULL, version INTEGER NOT NULL,
+        FOREIGN KEY(order_id) REFERENCES orders(order_id)
+      );
+      CREATE TABLE tool_idempotency (
+        idempotency_key TEXT PRIMARY KEY, tool_name TEXT NOT NULL,
+        result_json TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+    `);
+    legacy
+      .prepare("INSERT INTO orders VALUES (?, ?, ?, ?, ?)")
+      .run("SO-1001", "in production", "2026-07-20", 82000, 100000);
+    legacy
+      .prepare("INSERT INTO work_orders VALUES (?, ?, ?, ?, ?)")
+      .run("WO-1001", "SO-1001", 80, "waiting for QA", 2);
+    legacy
+      .prepare("INSERT INTO tool_idempotency VALUES (?, ?, ?, ?)")
+      .run("idem-1", "report_production_progress", JSON.stringify({ legacy: true }), "2026-07-12T00:00:00Z");
+    legacy.close();
+
+    store = new ReferenceEnterpriseStore(databasePath);
+
+    expectStoreError(() => store.reportProductionProgress(progressInput), "source_conflict");
+    expect(store.queryOrderStatus("SO-1001")).toMatchObject({ completionRate: 80, version: 2 });
+    store.close();
+    const upgraded = new Database(databasePath, { readonly: true });
+    const columns = upgraded.prepare("PRAGMA table_info(tool_idempotency)").all() as Array<{ name: string }>;
+    upgraded.close();
+    expect(columns.map((column) => column.name)).toContain("request_fingerprint");
   });
 
   it("rejects stale versions without changing the work order", () => {
