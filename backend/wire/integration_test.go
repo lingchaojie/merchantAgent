@@ -104,6 +104,16 @@ func TestEnterpriseConnectorsRegisterDesktopProxyLast(t *testing.T) {
 	}
 }
 
+func TestOpenConnectorRegistryUsesConfiguredPath(t *testing.T) {
+	registry, err := openConnectorRegistry(filepath.Join(t.TempDir(), "connectors.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func liveAgent(t *testing.T) (*runtime.LLMAgent, *runtime.AuditLog, *skill.Store) {
 	t.Helper()
 	key := os.Getenv("LLM_API_KEY")

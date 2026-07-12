@@ -15,19 +15,24 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/merchantagent/backend/connector"
+	"github.com/merchantagent/backend/connectorregistry"
 	"github.com/merchantagent/backend/provider"
 	"github.com/merchantagent/backend/wire"
 )
 
 type server struct {
-	asm          *wire.Assembled
-	tenant       string
-	mu           sync.Mutex
-	pendingTools map[string]chan connector.LocalToolResponse
-	sessions     map[string][]provider.Message // sessionId → history (per-session)
-	pending      map[string]chan fileResult    // reqId → waiting file bridge request
+	asm                *wire.Assembled
+	tenant             string
+	mu                 sync.Mutex
+	pendingTools       map[string]chan connector.LocalToolResponse
+	sessions           map[string][]provider.Message // sessionId → history (per-session)
+	pending            map[string]chan fileResult    // reqId → waiting file bridge request
+	adminChecker       adminChecker
+	credentialVerifier connectorregistry.CredentialVerifier
+	now                func() time.Time
 }
 
 func main() {
@@ -43,21 +48,29 @@ func main() {
 	prov := provider.NewOpenAI(envOr("LLM_BASE_URL", "https://www.linx2.ai"), key, envOr("LLM_MODEL", "gpt-5.5"))
 
 	dataDir := envOr("DATA_DIR", "")
-	configDB, skillDB := os.Getenv("CONFIG_DB"), os.Getenv("SKILL_DB")
+	configDB, skillDB, connectorDB := os.Getenv("CONFIG_DB"), os.Getenv("SKILL_DB"), os.Getenv("CONNECTOR_DB")
 	if configDB == "" && dataDir != "" {
 		configDB = dataDir + "/config.db"
 	}
 	if skillDB == "" && dataDir != "" {
 		skillDB = dataDir + "/skills.db"
 	}
+	if connectorDB == "" && dataDir != "" {
+		connectorDB = dataDir + "/connectors.db"
+	}
+	platformPublicKey, err := loadImplementationPublicKey(os.Getenv("IMPLEMENTATION_PUBLIC_KEY_FILE"))
+	if err != nil {
+		log.Fatalf("implementation verification key: %v", err)
+	}
 
 	asm, err := wire.Assemble(ctx, wire.Config{
-		OpenFGAURL: apiURL,
-		Tenant:     tenant,
-		OrgFile:    envOr("MOCK_ORG_FILE", "testdata/mock-org.yaml"),
-		ConfigDB:   configDB,
-		SkillDB:    skillDB,
-		Provider:   prov,
+		OpenFGAURL:  apiURL,
+		Tenant:      tenant,
+		OrgFile:     envOr("MOCK_ORG_FILE", "testdata/mock-org.yaml"),
+		ConfigDB:    configDB,
+		SkillDB:     skillDB,
+		ConnectorDB: connectorDB,
+		Provider:    prov,
 	})
 	if err != nil {
 		log.Fatalf("assemble: %v", err)
@@ -66,9 +79,11 @@ func main() {
 
 	s := &server{
 		asm: asm, tenant: tenant,
-		sessions:     map[string][]provider.Message{},
-		pending:      map[string]chan fileResult{},
-		pendingTools: map[string]chan connector.LocalToolResponse{},
+		sessions:           map[string][]provider.Message{},
+		pending:            map[string]chan fileResult{},
+		pendingTools:       map[string]chan connector.LocalToolResponse{},
+		credentialVerifier: connectorregistry.CredentialVerifier{PlatformPublicKey: platformPublicKey},
+		now:                time.Now,
 	}
 	log.Printf("agentd listening on %s (tenant=%s, openfga=%s, model=%s)", addr, tenant, apiURL, envOr("LLM_MODEL", "gpt-5.5"))
 	log.Fatal(http.ListenAndServe(addr, s.routes()))
@@ -83,7 +98,17 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("/chat/local-tool-result", s.handleLocalToolResult)
 	mux.HandleFunc("/audit", s.handleAudit)
 
-	admin := func(h http.HandlerFunc) http.HandlerFunc { return requireAdmin(s.asm.Store, s.tenant, h) }
+	checker := s.adminChecker
+	if checker == nil {
+		checker = s.asm.Store
+	}
+	admin := func(h http.HandlerFunc) http.HandlerFunc { return requireAdmin(checker, s.tenant, h) }
+	mux.HandleFunc("POST /implementation/connectors", s.handleConnectorSubmit)
+	mux.HandleFunc("GET /connectors/{id}/versions/{version}/approval", s.handleConnectorApproval)
+	mux.HandleFunc("GET /admin/connectors", admin(s.handleConnectorsList))
+	mux.HandleFunc("POST /admin/connectors/{id}/versions/{version}/publish", admin(s.handleConnectorPublish))
+	mux.HandleFunc("POST /admin/connectors/{id}/versions/{version}/suspend", admin(s.handleConnectorSuspend))
+	mux.HandleFunc("POST /admin/connectors/{id}/versions/{version}/revoke", admin(s.handleConnectorRevoke))
 	mux.HandleFunc("GET /admin/tools", admin(s.handleTools))
 	mux.HandleFunc("GET /admin/roles", admin(s.handleRolesList))
 	mux.HandleFunc("POST /admin/roles", admin(s.handleRoleCreate))

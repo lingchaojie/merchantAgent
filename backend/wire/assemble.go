@@ -11,6 +11,7 @@ import (
 	"github.com/merchantagent/backend/connector/crm"
 	"github.com/merchantagent/backend/connector/erp"
 	"github.com/merchantagent/backend/connector/localfile"
+	"github.com/merchantagent/backend/connectorregistry"
 	"github.com/merchantagent/backend/org"
 	"github.com/merchantagent/backend/provider"
 	"github.com/merchantagent/backend/runtime"
@@ -19,12 +20,13 @@ import (
 
 // Config drives Assemble.
 type Config struct {
-	OpenFGAURL string
-	Tenant     string
-	OrgFile    string
-	ConfigDB   string            // config store file path ("" → in-memory)
-	SkillDB    string            // skill store file path ("" → in-memory)
-	Provider   provider.Provider // the LLM seam
+	OpenFGAURL  string
+	Tenant      string
+	OrgFile     string
+	ConfigDB    string            // config store file path ("" → in-memory)
+	SkillDB     string            // skill store file path ("" → in-memory)
+	ConnectorDB string            // connector registry file path ("" → in-memory)
+	Provider    provider.Provider // the LLM seam
 }
 
 // Assembled is the wired composition root: the LLM agent plus the pieces the
@@ -37,6 +39,7 @@ type Assembled struct {
 	Projector *Projector
 	Cfg       *config.Store
 	Sk        *skill.Store
+	Registry  *connectorregistry.Store
 	Conns     []connector.Connector // server connectors + desktop proxy
 
 	erp *erp.ERP
@@ -79,6 +82,14 @@ func Assemble(ctx context.Context, cfg Config) (*Assembled, error) {
 		sk.Close()
 		return nil, err
 	}
+	registry, err := openConnectorRegistry(cfg.ConnectorDB)
+	if err != nil {
+		e.Close()
+		c.Close()
+		sk.Close()
+		cf.Close()
+		return nil, err
+	}
 
 	projector := NewProjector(store, idp, cf, sk, cfg.Tenant)
 	if err := projector.Reproject(ctx); err != nil {
@@ -86,6 +97,7 @@ func Assemble(ctx context.Context, cfg Config) (*Assembled, error) {
 		c.Close()
 		sk.Close()
 		cf.Close()
+		registry.Close()
 		return nil, fmt.Errorf("initial projection: %w", err)
 	}
 
@@ -95,7 +107,7 @@ func Assemble(ctx context.Context, cfg Config) (*Assembled, error) {
 	agent := runtime.NewLLMAgent(cfg.Provider, conns, runtime.NewGuard(store, cfg.Tenant), resolver, audit, cfg.Tenant).
 		WithAmbient(localfile.Tools()...) // local files via the desktop reverse bridge
 
-	return &Assembled{Agent: agent, IDP: idp, Audit: audit, Store: store, Projector: projector, Cfg: cf, Sk: sk, Conns: conns, erp: e, crm: c}, nil
+	return &Assembled{Agent: agent, IDP: idp, Audit: audit, Store: store, Projector: projector, Cfg: cf, Sk: sk, Registry: registry, Conns: conns, erp: e, crm: c}, nil
 }
 
 func enterpriseConnectors(e, c connector.Connector) []connector.Connector {
@@ -110,6 +122,18 @@ func (a *Assembled) Close() {
 	a.crm.Close()
 	a.Sk.Close()
 	a.Cfg.Close()
+	a.Registry.Close()
+}
+
+func openConnectorRegistry(path string) (*connectorregistry.Store, error) {
+	if path == "" {
+		path = ":memory:"
+	}
+	registry, err := connectorregistry.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open connector registry: %w", err)
+	}
+	return registry, nil
 }
 
 func openSkill(path string) (*skill.Store, error) {
