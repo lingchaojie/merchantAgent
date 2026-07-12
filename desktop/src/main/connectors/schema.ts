@@ -363,7 +363,7 @@ function parsePublicTool(value: unknown, path: string): PublicToolContract {
     risk,
     requiresConfirmation,
     timeoutMS: integer(raw.timeoutMS, `${path}.timeoutMS`),
-    maxResults: integer(raw.maxResults, `${path}.maxResults`),
+    maxResults: integer(raw.maxResults, `${path}.maxResults`, 1, 100),
   };
 }
 
@@ -440,7 +440,7 @@ function parseOperation(value: unknown, path: string): SQLOperation {
       bindings: array(raw.bindings, `${path}.bindings`, parseBinding),
       projection: array(raw.projection, `${path}.projection`, parseProjection),
       declaredObjects: stringArray(raw.declaredObjects, `${path}.declaredObjects`, true),
-      maxResults: integer(raw.maxResults, `${path}.maxResults`),
+      maxResults: integer(raw.maxResults, `${path}.maxResults`, 1, 100),
       timeoutMS: integer(raw.timeoutMS, `${path}.timeoutMS`),
     };
   }

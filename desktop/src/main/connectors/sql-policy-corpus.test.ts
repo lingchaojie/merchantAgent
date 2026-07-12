@@ -7,7 +7,7 @@ function fixtureReadOperation(): SQLReadOperation {
   return {
     kind: "read",
     tool: "query_order_status",
-    sql: "SELECT o.order_id AS order_id, o.status AS order_status FROM dbo.production_orders AS o WHERE o.order_id = @orderId ORDER BY o.order_id ASC",
+    sql: "SELECT TOP 10 o.order_id AS order_id, o.status AS order_status FROM dbo.production_orders AS o WHERE o.order_id = @orderId ORDER BY o.order_id ASC",
     bindings: [
       { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 64 },
     ],
@@ -57,9 +57,17 @@ interface ReadAttack {
   name: string;
   reason: string;
   sql: string;
+  preserveMissingTop?: boolean;
+}
+
+function withRequiredTop(sql: string): string {
+  return sql.startsWith("SELECT ") && !sql.startsWith("SELECT TOP ")
+    ? sql.replace("SELECT ", "SELECT TOP 10 ")
+    : sql;
 }
 
 const READ_ATTACKS: ReadAttack[] = [
+  { name: "missing required TOP", reason: "top", preserveMissingTop: true, sql: "SELECT o.order_id AS order_id, o.status AS order_status FROM dbo.production_orders o WHERE o.order_id=@orderId" },
   { name: "stacked delete", reason: "statement_count", sql: "SELECT o.order_id AS order_id, o.status AS order_status FROM dbo.production_orders o WHERE o.order_id=@orderId; DELETE FROM dbo.production_orders" },
   { name: "stacked update", reason: "statement_count", sql: "SELECT o.order_id AS order_id, o.status AS order_status FROM dbo.production_orders o WHERE o.order_id=@orderId; UPDATE dbo.production_orders SET status=@orderId" },
   { name: "stacked select", reason: "statement_count", sql: "SELECT o.order_id AS order_id, o.status AS order_status FROM dbo.production_orders o WHERE o.order_id=@orderId; SELECT 1" },
@@ -161,8 +169,9 @@ describe("restricted T-SQL attack corpus", () => {
     expect(READ_ATTACKS.length).toBeGreaterThanOrEqual(60);
   });
 
-  it.each(READ_ATTACKS)("denies read attack: $name [$reason]", ({ sql, reason }) => {
-    expect(() => validateReadOperation({ ...fixtureReadOperation(), sql })).toThrowError(
+  it.each(READ_ATTACKS)("denies read attack: $name [$reason]", ({ sql, reason, preserveMissingTop }) => {
+    const candidateSQL = preserveMissingTop ? sql : withRequiredTop(sql);
+    expect(() => validateReadOperation({ ...fixtureReadOperation(), sql: candidateSQL })).toThrowError(
       `unsafe_template: ${reason}`,
     );
   });

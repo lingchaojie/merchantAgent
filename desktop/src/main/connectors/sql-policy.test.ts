@@ -17,7 +17,7 @@ export function fixtureReadOperation(): SQLReadOperation {
     kind: "read",
     tool: "query_order_status",
     sql: [
-      "SELECT o.order_id AS order_id, o.status AS order_status",
+      "SELECT TOP 10 o.order_id AS order_id, o.status AS order_status",
       "FROM dbo.production_orders AS o",
       "WHERE o.order_id = @orderId",
       "ORDER BY o.order_id ASC",
@@ -135,7 +135,7 @@ describe("restricted T-SQL read policy", () => {
   it("accepts a declared inner join with fixed identifiers", () => {
     const operation = fixtureReadOperation();
     operation.sql = [
-      "SELECT o.order_id AS order_id, c.customer_name AS order_status",
+      "SELECT TOP 10 o.order_id AS order_id, c.customer_name AS order_status",
       "FROM dbo.production_orders AS o",
       "INNER JOIN dbo.customers AS c ON c.customer_id = o.customer_id",
       "WHERE o.order_id = @orderId",
@@ -148,7 +148,7 @@ describe("restricted T-SQL read policy", () => {
   it("requires a join predicate to bind two different declared table qualifiers", () => {
     const operation = fixtureReadOperation();
     operation.sql = [
-      "SELECT o.order_id AS order_id, c.customer_name AS order_status",
+      "SELECT TOP 10 o.order_id AS order_id, c.customer_name AS order_status",
       "FROM dbo.production_orders AS o",
       "INNER JOIN dbo.customers AS c ON o.customer_id = o.customer_id",
       "WHERE o.order_id = @orderId",
@@ -161,7 +161,7 @@ describe("restricted T-SQL read policy", () => {
   it("requires every later join predicate to bind the table introduced by that join", () => {
     const operation = fixtureReadOperation();
     operation.sql = [
-      "SELECT o.order_id AS order_id, c.customer_name AS order_status",
+      "SELECT TOP 10 o.order_id AS order_id, c.customer_name AS order_status",
       "FROM dbo.production_orders AS o",
       "INNER JOIN dbo.customers AS c ON c.customer_id = o.customer_id",
       "INNER JOIN dbo.secret AS s ON c.customer_id = o.customer_id",
@@ -174,7 +174,7 @@ describe("restricted T-SQL read policy", () => {
 
   it("accepts a direct column's deterministic implicit alias when metadata matches", () => {
     const operation = fixtureReadOperation();
-    operation.sql = "SELECT o.order_id FROM dbo.production_orders AS o WHERE o.order_id = @orderId";
+    operation.sql = "SELECT TOP 10 o.order_id FROM dbo.production_orders AS o WHERE o.order_id = @orderId";
     operation.projection = [operation.projection[0]];
 
     expect(() => validateReadOperation(operation)).not.toThrow();
@@ -182,7 +182,7 @@ describe("restricted T-SQL read policy", () => {
 
   it("rejects a direct column's implicit alias when projection metadata differs", () => {
     const operation = fixtureReadOperation();
-    operation.sql = "SELECT o.status FROM dbo.production_orders AS o WHERE o.order_id = @orderId";
+    operation.sql = "SELECT TOP 10 o.status FROM dbo.production_orders AS o WHERE o.order_id = @orderId";
     operation.projection = [operation.projection[0]];
 
     expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: projection_mismatch");
@@ -202,6 +202,21 @@ describe("restricted T-SQL read policy", () => {
   it("requires SQL result aliases to match projection metadata exactly", () => {
     const operation = fixtureReadOperation();
     operation.projection[1] = { ...operation.projection[1], sourceAlias: "different_alias" };
+
+    expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: projection_mismatch");
+  });
+
+  it("rejects discovered result aliases that collide under SQL Server case folding", () => {
+    const operation = fixtureReadOperation();
+    operation.sql = operation.sql.replace("o.status AS order_status", "o.status AS ORDER_ID");
+    operation.projection[1] = { ...operation.projection[1], sourceAlias: "ORDER_ID" };
+
+    expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: projection");
+  });
+
+  it("rejects declared projection aliases that collide under SQL Server case folding", () => {
+    const operation = fixtureReadOperation();
+    operation.projection[1] = { ...operation.projection[1], sourceAlias: "ORDER_ID" };
 
     expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: projection_mismatch");
   });
@@ -233,11 +248,45 @@ describe("restricted T-SQL read policy", () => {
 
   it("allows only a fixed TOP equal to maxResults", () => {
     const operation = fixtureReadOperation();
-    operation.sql = operation.sql.replace("SELECT", "SELECT TOP 10");
     expect(() => validateReadOperation(operation)).not.toThrow();
 
     operation.sql = operation.sql.replace("TOP 10", "TOP 11");
     expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: top");
+  });
+
+  it("rejects a read SELECT without TOP", () => {
+    const operation = fixtureReadOperation();
+    operation.sql = operation.sql.replace("TOP 10 ", "");
+
+    expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: top");
+  });
+
+  it.each([
+    [0, "TOP 0"],
+    [101, "TOP 101"],
+    [1.5, "TOP 10"],
+  ] as const)("rejects policy maxResults outside the integer 1..100 bound: %s", (maxResults, top) => {
+    const operation = fixtureReadOperation();
+    operation.maxResults = maxResults;
+    operation.sql = operation.sql.replace("TOP 10", top);
+
+    expect(() => validateReadOperation(operation)).toThrowError("unsafe_template: top");
+  });
+
+  it("enforces the operation maxResults bound in strict payload parsing", () => {
+    const operation = fixtureReadOperation();
+    operation.maxResults = 101;
+    const payload = fixturePayload(operation);
+    payload.publicContract.tools[0].maxResults = 101;
+
+    expect(() => parseConnectorPrivatePayload(payload)).toThrowError("maxResults must be an integer from 1 through 100");
+  });
+
+  it("enforces the public tool maxResults bound in strict payload parsing", () => {
+    const payload = fixturePayload(fixtureReadOperation());
+    payload.publicContract.tools[0].maxResults = 101;
+
+    expect(() => parseConnectorPrivatePayload(payload)).toThrowError("maxResults must be an integer from 1 through 100");
   });
 
   it("rejects undeclared and unused objects", () => {
@@ -285,6 +334,29 @@ describe("restricted T-SQL update policy", () => {
       "order_id = @orderId",
       "status = @orderId",
     );
+
+    expect(() => validateUpdateOperation(operation)).toThrowError("unsafe_template: update_guard");
+  });
+
+  it.each([
+    { target: "beforeSql", where: "WHERE o.status = @orderId", attack: "resource parameter on unrelated column" },
+    { target: "beforeSql", where: "WHERE o.order_id <> @orderId", attack: "non-equality resource predicate" },
+    { target: "beforeSql", where: "WHERE o.order_id = @orderId OR o.status = @orderId", attack: "disjunctive resource predicate" },
+    { target: "readBackSql", where: "WHERE o.status = @orderId", attack: "resource parameter on unrelated column" },
+    { target: "readBackSql", where: "WHERE o.order_id <> @orderId", attack: "non-equality resource predicate" },
+    { target: "readBackSql", where: "WHERE o.order_id = @orderId OR o.status = @orderId", attack: "disjunctive resource predicate" },
+  ] as const)("rejects $target leak: $attack", ({ target, where }) => {
+    const operation = fixtureUpdateOperation();
+    operation[target] = operation[target].replace("WHERE o.order_id = @orderId", where);
+
+    expect(() => validateUpdateOperation(operation)).toThrowError("unsafe_template: update_guard");
+  });
+
+  it("requires before and read-back templates to project the resource field", () => {
+    const operation = fixtureUpdateOperation();
+    operation.projection = operation.projection.slice(1);
+    operation.beforeSql = operation.beforeSql.replace("o.order_id AS order_id, ", "");
+    operation.readBackSql = operation.readBackSql.replace("o.order_id AS order_id, ", "");
 
     expect(() => validateUpdateOperation(operation)).toThrowError("unsafe_template: update_guard");
   });

@@ -87,7 +87,7 @@ function locallyValidatedDraft(): ConnectorDraft {
         {
           kind: "read",
           tool: "query_order_status",
-          sql: "SELECT order_id FROM dbo.production_orders WHERE order_id = @orderId",
+          sql: "SELECT TOP 10 order_id FROM dbo.production_orders WHERE order_id = @orderId",
           bindings: [{ parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 64 }],
           projection: [{ sourceAlias: "order_id", resultField: "orderId", type: "string" }],
           declaredObjects: ["dbo.production_orders"],

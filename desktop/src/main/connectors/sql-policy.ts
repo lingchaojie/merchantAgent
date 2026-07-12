@@ -30,6 +30,10 @@ interface SelectValidationOptions {
 
 interface ValidatedSelect extends ValidatedSQL {
   resultColumns: ReadonlyMap<string, string>;
+  predicate: {
+    andOnly: boolean;
+    leaves: ReadonlyArray<{ column: string; parameter: string; operator: string }>;
+  } | null;
 }
 
 interface ValidatedUpdateTemplate extends ValidatedSQL {
@@ -215,15 +219,25 @@ function predicateLeaf(
   };
 }
 
-function validateReadPredicate(value: unknown, qualifiers: ReadonlySet<string>, parameters: Set<string>): void {
+function validateReadPredicate(
+  value: unknown,
+  qualifiers: ReadonlySet<string>,
+  parameters: Set<string>,
+): { andOnly: boolean; leaves: Array<{ column: string; parameter: string; operator: string }> } {
   const node = record(value, "expression");
   if (node.type === "binary_expr" && (node.operator === "AND" || node.operator === "OR")) {
     assertKnownKeys(node, ["type", "operator", "left", "right"], "binary_expr");
-    validateReadPredicate(node.left, qualifiers, parameters);
-    validateReadPredicate(node.right, qualifiers, parameters);
-    return;
+    const left = validateReadPredicate(node.left, qualifiers, parameters);
+    const right = validateReadPredicate(node.right, qualifiers, parameters);
+    return {
+      andOnly: node.operator === "AND" && left.andOnly && right.andOnly,
+      leaves: [...left.leaves, ...right.leaves],
+    };
   }
-  predicateLeaf(node, qualifiers, parameters, ALLOWED_READ_OPERATORS);
+  return {
+    andOnly: true,
+    leaves: [predicateLeaf(node, qualifiers, parameters, ALLOWED_READ_OPERATORS)],
+  };
 }
 
 function validateJoinPredicate(
@@ -321,14 +335,20 @@ function validateProjection(
     return alias;
   });
   orderedUnique(aliases, "projection");
+  rejectCaseFoldedDuplicates(aliases, "projection");
   const expectedAliases = orderedUnique(expected.map((projection) => projection.sourceAlias), "projection_mismatch");
+  rejectCaseFoldedDuplicates(expectedAliases, "projection_mismatch");
   orderedUnique(expected.map((projection) => projection.resultField), "projection_mismatch");
   if (!sameOrderedValues(aliases, expectedAliases)) unsafe("projection_mismatch");
   return { aliases, resultColumns };
 }
 
 function validateTop(value: unknown, maxResults: number | undefined): void {
-  if (value === null) return;
+  if (maxResults === undefined) {
+    if (value !== null) unsafe("top");
+    return;
+  }
+  if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 100 || value === null) unsafe("top");
   const top = record(value, "top");
   assertKnownKeys(top, ["value", "percent", "parentheses"], "top");
   if (!Number.isSafeInteger(top.value) || (top.value as number) < 1 || top.percent !== null) unsafe("top");
@@ -375,13 +395,16 @@ function validateSelectTemplate(sql: string, options: SelectValidationOptions): 
   const qualifiers = validateFrom(statement.from, declaredObjects);
   const projection = validateProjection(statement.columns, qualifiers, options.projection);
   const parameters = new Set<string>();
-  if (statement.where !== null) validateReadPredicate(statement.where, qualifiers, parameters);
+  const predicate = statement.where === null
+    ? null
+    : validateReadPredicate(statement.where, qualifiers, parameters);
   validateOrderBy(statement.orderby, qualifiers);
   return {
     normalizedSQL: parsed.normalizedSQL,
     parameterNames: parameters,
     resultAliases: new Set(projection.aliases),
     resultColumns: projection.resultColumns,
+    predicate,
   };
 }
 
@@ -551,6 +574,20 @@ export function validateUpdateOperation(operation: SQLUpdateOperation): {
     beforeResourceColumn === undefined
     || readBackResourceColumn === undefined
     || beforeResourceColumn.toLowerCase() !== readBackResourceColumn.toLowerCase()
+    || before.predicate === null
+    || !before.predicate.andOnly
+    || !before.predicate.leaves.some((leaf) => (
+      leaf.operator === "="
+        && leaf.parameter === operation.resourceParameter
+        && leaf.column.toLowerCase() === beforeResourceColumn.toLowerCase()
+    ))
+    || readBack.predicate === null
+    || !readBack.predicate.andOnly
+    || !readBack.predicate.leaves.some((leaf) => (
+      leaf.operator === "="
+        && leaf.parameter === operation.resourceParameter
+        && leaf.column.toLowerCase() === readBackResourceColumn.toLowerCase()
+    ))
     || !update.guards.some((guard) => (
       guard.parameter === operation.resourceParameter
         && guard.column.toLowerCase() === beforeResourceColumn.toLowerCase()

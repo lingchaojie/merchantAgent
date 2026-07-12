@@ -24,7 +24,7 @@ function fixturePayload(): ConnectorPrivatePayload {
       {
         kind: "read",
         tool: "query_order_status",
-        sql: "SELECT order_id FROM dbo.production_orders WHERE order_id = @orderId",
+        sql: "SELECT TOP 10 order_id FROM dbo.production_orders WHERE order_id = @orderId",
         bindings: [
           { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 64 },
         ],
