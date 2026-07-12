@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import type { ResumedUpdate, SQLServerAdapter, UpdatePreview } from "../connectors/sql-adapter";
+import type { SQLUpdateOperation } from "../connectors/schema";
 import {
   LocalToolError,
   type LocalToolErrorCode,
@@ -11,8 +13,8 @@ import type {
   ProductionProgressResult,
 } from "./store";
 
-export type LocalToolStatus = "succeeded" | "failed" | "cancelled" | "source_conflict";
-export type LocalToolResponseError = LocalToolErrorCode | "cancelled" | "local_execution_failed";
+export type LocalToolStatus = "succeeded" | "failed" | "cancelled" | "source_conflict" | "unknown";
+export type LocalToolResponseError = LocalToolErrorCode | "cancelled" | "local_execution_failed" | "source_rejected" | "unknown";
 
 export interface LocalToolRequest {
   packageId: string;
@@ -64,6 +66,11 @@ export interface LocalDataSource {
   reportProductionProgress(input: ProductionProgressInput): ProductionProgressResult;
 }
 
+export interface SQLUpdateRuntime {
+  operation: SQLUpdateOperation;
+  adapter: Pick<SQLServerAdapter, "resumeUpdate" | "previewUpdate" | "executeConfirmedUpdate">;
+}
+
 export type LocalDataSourceErrorCode = "missing_datasource" | "invalid_credentials";
 
 export class LocalDataSourceError extends Error {
@@ -101,17 +108,32 @@ function localErrorCode(error: unknown): LocalToolResponseError {
     error !== null &&
     "code" in error &&
     ((error as { code?: unknown }).code === "invalid_argument" ||
-      (error as { code?: unknown }).code === "source_conflict")
+      (error as { code?: unknown }).code === "source_conflict" ||
+      (error as { code?: unknown }).code === "source_rejected" ||
+      (error as { code?: unknown }).code === "unknown")
   ) {
-    return (error as { code: "invalid_argument" | "source_conflict" }).code;
+    return (error as { code: "invalid_argument" | "source_conflict" | "source_rejected" | "unknown" }).code;
   }
   return "local_execution_failed";
+}
+
+function resumedErrorMetadata(error: unknown): { confirmedAt: string; before: OrderStatus } | null {
+  if (typeof error !== "object" || error === null || (error as { name?: unknown }).name !== "ResumedUpdateError") {
+    return null;
+  }
+  const confirmedAt = (error as { confirmedAt?: unknown }).confirmedAt;
+  const before = (error as { before?: unknown }).before;
+  if (typeof confirmedAt !== "string" || typeof before !== "object" || before === null || Array.isArray(before)) {
+    return null;
+  }
+  return { confirmedAt, before: before as OrderStatus };
 }
 
 export class LocalToolExecutor {
   constructor(
     private readonly pkg: VerifiedPackage,
     private readonly store?: LocalDataSource,
+    private readonly sqlUpdateRuntime?: SQLUpdateRuntime,
   ) {}
 
   async execute(req: LocalToolRequest, confirm: Confirm): Promise<LocalToolResponse> {
@@ -131,12 +153,11 @@ export class LocalToolExecutor {
       );
       validateRequestMetadata(req, tool);
       tool.validate(req.args);
-      if (!this.store) {
-        throw new LocalDataSourceError("missing_datasource", "local datasource is unavailable");
-      }
-
       switch (req.tool) {
         case "query_order_status": {
+          if (!this.store) {
+            throw new LocalDataSourceError("missing_datasource", "local datasource is unavailable");
+          }
           const data = this.store.queryOrderStatus(String(req.args.orderId));
           return { data, meta: { ...base, status: "succeeded" } };
         }
@@ -158,6 +179,12 @@ export class LocalToolExecutor {
             note: notePresent ? String(req.args.note) : undefined,
           });
           base = { ...base, idempotencyKey: approvedRequest.idempotencyKey };
+          if (this.sqlUpdateRuntime !== undefined) {
+            return await this.executeSQLProgress(approvedRequest, base, confirm);
+          }
+          if (!this.store) {
+            throw new LocalDataSourceError("missing_datasource", "local datasource is unavailable");
+          }
           const before = this.store.queryOrderStatus(approvedRequest.orderId);
           if (before.workOrderId !== approvedRequest.workOrderId) {
             throw new LocalToolError("source_conflict", "work order does not belong to the order");
@@ -207,10 +234,129 @@ export class LocalToolExecutor {
       }
     } catch (error) {
       const code = localErrorCode(error);
+      const resumed = resumedErrorMetadata(error);
+      if (resumed !== null) {
+        return {
+          meta: {
+            ...base,
+            status: code === "source_conflict" ? "source_conflict" : code === "unknown" ? "unknown" : "failed",
+            confirmed: true,
+            confirmedAt: resumed.confirmedAt,
+            before: resumed.before,
+          },
+          error: code,
+        };
+      }
       return {
-        meta: { ...base, status: code === "source_conflict" ? "source_conflict" : "failed" },
+        meta: {
+          ...base,
+          status: code === "source_conflict" ? "source_conflict" : code === "unknown" ? "unknown" : "failed",
+        },
         error: code,
       };
     }
+  }
+
+  private async executeSQLProgress(
+    approvedRequest: Readonly<{
+      idempotencyKey: string;
+      orderId: string;
+      workOrderId: string;
+      completionRate: number;
+      expectedVersion: number;
+      notePresent: boolean;
+      note?: string;
+    }>,
+    base: { executionId: string; idempotencyKey: string; confirmed: boolean },
+    confirm: Confirm,
+  ): Promise<LocalToolResponse> {
+    const runtime = this.sqlUpdateRuntime;
+    if (runtime === undefined) throw new LocalDataSourceError("missing_datasource", "SQL runtime is unavailable");
+    const candidates: Record<string, unknown> = {
+      orderId: approvedRequest.orderId,
+      workOrderId: approvedRequest.workOrderId,
+      completionRate: approvedRequest.completionRate,
+      expectedVersion: approvedRequest.expectedVersion,
+      nextVersion: approvedRequest.expectedVersion + 1,
+      ...(approvedRequest.notePresent ? { note: approvedRequest.note } : {}),
+    };
+    const argumentNames = new Set(runtime.operation.bindings.map((binding) => binding.argument));
+    const sqlArgs: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(candidates)) {
+      if (argumentNames.has(name)) sqlArgs[name] = value;
+    }
+    Object.freeze(sqlArgs);
+
+    const resumed: ResumedUpdate | null = await runtime.adapter.resumeUpdate(
+      runtime.operation,
+      sqlArgs,
+      approvedRequest.idempotencyKey,
+    );
+    if (resumed !== null) {
+      return {
+        data: resumed.result as unknown as OrderStatus,
+        meta: {
+          ...base,
+          status: "succeeded",
+          confirmed: true,
+          confirmedAt: resumed.confirmedAt,
+          before: resumed.before as unknown as OrderStatus,
+          after: resumed.result as unknown as OrderStatus,
+        },
+      };
+    }
+
+    const preview: UpdatePreview = await runtime.adapter.previewUpdate(runtime.operation, sqlArgs);
+    if (preview.before.workOrderId !== approvedRequest.workOrderId) {
+      throw new LocalToolError("source_conflict", "work order does not belong to the order");
+    }
+    const approved = await confirm(Object.freeze({
+      orderId: approvedRequest.orderId,
+      workOrderId: approvedRequest.workOrderId,
+      before: preview.before as unknown as OrderStatus,
+      proposed: Object.freeze({
+        completionRate: approvedRequest.completionRate,
+        note: String(preview.proposed.note),
+      }),
+    }));
+    if (!approved) {
+      return {
+        meta: { ...base, status: "cancelled", before: preview.before as unknown as OrderStatus },
+        error: "cancelled",
+      };
+    }
+    const confirmedAt = new Date().toISOString();
+    let after: Record<string, unknown>;
+    try {
+      after = await runtime.adapter.executeConfirmedUpdate(
+        runtime.operation,
+        sqlArgs,
+        approvedRequest.idempotencyKey,
+        preview,
+      );
+    } catch (error) {
+      const code = localErrorCode(error);
+      return {
+        meta: {
+          ...base,
+          status: code === "source_conflict" ? "source_conflict" : code === "unknown" ? "unknown" : "failed",
+          confirmed: true,
+          confirmedAt,
+          before: preview.before as unknown as OrderStatus,
+        },
+        error: code,
+      };
+    }
+    return {
+      data: after as unknown as OrderStatus,
+      meta: {
+        ...base,
+        status: "succeeded",
+        confirmed: true,
+        confirmedAt,
+        before: preview.before as unknown as OrderStatus,
+        after: after as unknown as OrderStatus,
+      },
+    };
   }
 }

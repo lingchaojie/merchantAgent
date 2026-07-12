@@ -7,7 +7,9 @@ import {
   LocalToolExecutor,
   type LocalDataSource,
   type LocalToolRequest,
+  type SQLUpdateRuntime,
 } from "./executor";
+import type { SQLUpdateOperation } from "../connectors/schema";
 import { verifyCapabilityPackage, type VerifiedPackage } from "./package";
 import { ReferenceEnterpriseStore } from "./store";
 
@@ -294,5 +296,133 @@ describe("LocalToolExecutor", () => {
 
     expect(response.error).toBe("source_conflict");
     expect(confirm).not.toHaveBeenCalled();
+  });
+
+  function sqlRuntime(overrides: Partial<SQLUpdateRuntime["adapter"]> = {}): SQLUpdateRuntime {
+    return {
+      operation: {
+        kind: "update",
+        tool: "report_production_progress",
+        bindings: [
+          { parameter: "orderId", argument: "orderId", type: "NVarChar", maxLength: 64 },
+          { parameter: "workOrderId", argument: "workOrderId", type: "NVarChar", maxLength: 64 },
+          { parameter: "completionRate", argument: "completionRate", type: "Int" },
+          { parameter: "expectedVersion", argument: "expectedVersion", type: "Int" },
+          { parameter: "nextVersion", argument: "nextVersion", type: "Int" },
+          { parameter: "note", argument: "note", type: "NVarChar", maxLength: 256 },
+        ],
+      } as SQLUpdateOperation,
+      adapter: {
+        resumeUpdate: vi.fn().mockResolvedValue(null),
+        previewUpdate: vi.fn().mockResolvedValue({
+          before: store.queryOrderStatus("SO-1001"),
+          proposed: { completionRate: 80, note: "waiting for QA", version: 2 },
+        }),
+        executeConfirmedUpdate: vi.fn().mockResolvedValue({
+          ...store.queryOrderStatus("SO-1001"), completionRate: 80, note: "waiting for QA", version: 2,
+        }),
+        ...overrides,
+      },
+    };
+  }
+
+  it("routes SQL writes through preview, native confirmation, and confirmed execution", async () => {
+    const runtime = sqlRuntime();
+    const sqlExecutor = new LocalToolExecutor(pkg, store, runtime);
+
+    const response = await sqlExecutor.execute(progressRequest(), async (preview) => {
+      expect(preview).toMatchObject({
+        orderId: "SO-1001",
+        workOrderId: "WO-1001",
+        before: { completionRate: 60, version: 1 },
+        proposed: { completionRate: 80, note: "waiting for QA" },
+      });
+      return true;
+    });
+
+    expect(runtime.adapter.resumeUpdate).toHaveBeenCalledWith(
+      runtime.operation,
+      { orderId: "SO-1001", workOrderId: "WO-1001", completionRate: 80, expectedVersion: 1, nextVersion: 2, note: "waiting for QA" },
+      "idem-1",
+    );
+    expect(runtime.adapter.executeConfirmedUpdate).toHaveBeenCalledOnce();
+    expect(response).toMatchObject({
+      data: { completionRate: 80, version: 2 },
+      meta: { status: "succeeded", confirmed: true, before: { version: 1 }, after: { version: 2 } },
+    });
+    expect(store.queryOrderStatus("SO-1001")).toMatchObject({ completionRate: 60, version: 1 });
+  });
+
+  it("cancels a SQL preview without beginning a ledger write", async () => {
+    const runtime = sqlRuntime();
+    const sqlExecutor = new LocalToolExecutor(pkg, store, runtime);
+
+    const response = await sqlExecutor.execute(progressRequest(), async () => false);
+
+    expect(response).toMatchObject({ error: "cancelled", meta: { status: "cancelled", confirmed: false } });
+    expect(runtime.adapter.executeConfirmedUpdate).not.toHaveBeenCalled();
+  });
+
+  it("returns SQL terminal replay without preview or reconfirmation", async () => {
+    const prior = {
+      result: { ...store.queryOrderStatus("SO-1001"), completionRate: 80, version: 2 },
+      before: store.queryOrderStatus("SO-1001"),
+      proposed: { completionRate: 80, note: "waiting for QA", version: 2 },
+      confirmedAt: "2026-07-13T00:00:00.000Z",
+    };
+    const runtime = sqlRuntime({ resumeUpdate: vi.fn().mockResolvedValue(prior) });
+    const confirm = vi.fn();
+
+    const response = await new LocalToolExecutor(pkg, store, runtime).execute(progressRequest(), confirm);
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(runtime.adapter.previewUpdate).not.toHaveBeenCalled();
+    expect(runtime.adapter.executeConfirmedUpdate).not.toHaveBeenCalled();
+    expect(response).toMatchObject({
+      data: prior.result,
+      meta: { status: "succeeded", confirmed: true, confirmedAt: prior.confirmedAt },
+    });
+  });
+
+  it("preserves confirmation metadata when SQL finalization is unknown", async () => {
+    const runtime = sqlRuntime({
+      executeConfirmedUpdate: vi.fn().mockRejectedValue(Object.assign(new Error("hidden"), { code: "unknown" })),
+    });
+
+    const response = await new LocalToolExecutor(pkg, store, runtime).execute(progressRequest(), async () => true);
+
+    expect(response).toMatchObject({
+      error: "unknown",
+      meta: {
+        status: "unknown",
+        confirmed: true,
+        confirmedAt: expect.any(String),
+        before: { orderId: "SO-1001", version: 1 },
+      },
+    });
+  });
+
+  it("preserves prior confirmation metadata when unknown recovery is inconclusive", async () => {
+    const priorBefore = store.queryOrderStatus("SO-1001");
+    const runtime = sqlRuntime({
+      resumeUpdate: vi.fn().mockRejectedValue(Object.assign(new Error("unknown"), {
+        name: "ResumedUpdateError",
+        code: "unknown",
+        confirmedAt: "2026-07-13T01:02:03.000Z",
+        before: priorBefore,
+      })),
+    });
+
+    const response = await new LocalToolExecutor(pkg, store, runtime).execute(progressRequest(), vi.fn());
+
+    expect(response).toMatchObject({
+      error: "unknown",
+      meta: {
+        status: "unknown",
+        confirmed: true,
+        confirmedAt: "2026-07-13T01:02:03.000Z",
+        before: priorBefore,
+      },
+    });
   });
 });
