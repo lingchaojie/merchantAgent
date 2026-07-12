@@ -18,10 +18,6 @@ function button(root: ReactTestInstance, name: string): ReactTestInstance {
   return found;
 }
 
-function editorField(root: ReactTestInstance, name: string): ReactTestInstance {
-  return root.findByProps({ name });
-}
-
 function toolCheckbox(root: ReactTestInstance, name: string): ReactTestInstance {
   const label = root.findAllByType("label").find((candidate) => nodeText(candidate).startsWith(name));
   if (!label) throw new Error(`tool not found: ${name}`);
@@ -215,14 +211,21 @@ it("rejects template cloning when the template references unavailable live tools
   expect(renderer.root.findAllByProps({ role: "alert" })).toHaveLength(1);
 });
 
-it("blocks blank-skill additions and saves when the initial live tool catalog load fails", async () => {
+it("keeps fetched Skills and staged historical removal when the initial tool catalog load fails", async () => {
+  const existing = { ...skillDraft(), allowedTools: ["legacy_tool"] };
   const client = {
-    listSkills: vi.fn(async () => []),
-    listTools: vi.fn(async () => { throw new Error("tool catalog unavailable"); }),
+    listSkills: vi.fn(async () => [existing]),
+    listTools: vi.fn()
+      .mockRejectedValueOnce(new Error("tool catalog unavailable"))
+      .mockResolvedValue([progressTool]),
     listRoles: vi.fn(async () => []),
-    listTemplates: vi.fn(async () => []),
+    listTemplates: vi.fn(async () => [{
+      templateId: "progress-template", name: "进度模板", description: "", playbookMd: "",
+      allowedTools: ["report_production_progress"], dataDomains: [], suggestedRoles: [],
+    }]),
     listDomains: vi.fn(async () => ({ domains: [], grants: [] })),
-    createBlankSkill: vi.fn(async () => undefined),
+    cloneTemplate: vi.fn(async () => undefined),
+    updateSkill: vi.fn(async () => undefined),
   } as unknown as AdminClient;
   let renderer!: ReactTestRenderer;
   await act(async () => { renderer = create(<SkillsPane client={client} tenantId="tenant-1" />); });
@@ -230,16 +233,61 @@ it("blocks blank-skill additions and saves when the initial live tool catalog lo
 
   expect(nodeText(renderer.root)).toContain("tool catalog unavailable");
   expect(nodeText(renderer.root)).toContain("实时工具目录不可用");
-  await act(async () => { button(renderer.root, "新建空白技能").props.onClick(); });
-  await act(async () => {
-    editorField(renderer.root, "skill-id").props.onChange({ target: { value: "new-skill" } });
-    editorField(renderer.root, "skill-name").props.onChange({ target: { value: "New Skill" } });
-  });
+  expect(nodeText(renderer.root)).toContain("生产进度");
+  await act(async () => { button(renderer.root, "编辑").props.onClick(); });
+  expect(toolCheckbox(renderer.root, "legacy_tool").props.checked).toBe(true);
+  expect(toolCheckbox(renderer.root, "legacy_tool").props.disabled).toBe(false);
+
+  const select = renderer.root.findByType("select");
+  await act(async () => { select.props.onChange({ target: { value: "progress-template" } }); });
+  expect(button(renderer.root, "克隆").props.disabled).toBe(true);
+  await act(async () => { button(renderer.root, "克隆").props.onClick(); await Promise.resolve(); });
+  expect(client.cloneTemplate).not.toHaveBeenCalled();
+
+  await act(async () => { toolCheckbox(renderer.root, "legacy_tool").props.onChange(); });
+  expect(toolCheckbox(renderer.root, "legacy_tool").props.checked).toBe(false);
+  expect(toolCheckbox(renderer.root, "legacy_tool").props.disabled).toBe(true);
 
   const save = button(renderer.root, "保存");
   expect(save.props.disabled).toBe(true);
   await act(async () => { save.props.onClick(); await Promise.resolve(); });
-  expect(client.createBlankSkill).not.toHaveBeenCalled();
+  expect(client.updateSkill).not.toHaveBeenCalled();
+
+  await act(async () => { button(renderer.root, "刷新工具目录").props.onClick(); await Promise.resolve(); });
+  await flush();
+  expect(toolCheckbox(renderer.root, "report_production_progress").props.disabled).toBe(false);
+  await act(async () => { toolCheckbox(renderer.root, "report_production_progress").props.onChange(); });
+  await act(async () => { button(renderer.root, "保存").props.onClick(); await Promise.resolve(); });
+  expect(client.updateSkill).toHaveBeenCalledWith("production-progress", expect.objectContaining({
+    allowedTools: ["report_production_progress"],
+  }));
+});
+
+it("keeps a successful tool catalog fresh but blocks save when a required editor resource fails", async () => {
+  const client = {
+    listSkills: vi.fn(async () => [skillDraft()]),
+    listTools: vi.fn(async () => [progressTool]),
+    listRoles: vi.fn(async () => { throw new Error("role catalog unavailable"); }),
+    listTemplates: vi.fn(async () => [{
+      templateId: "progress-template", name: "进度模板", description: "", playbookMd: "",
+      allowedTools: ["report_production_progress"], dataDomains: [], suggestedRoles: [],
+    }]),
+    listDomains: vi.fn(async () => ({ domains: [{ domainId: "orders", label: "订单" }], grants: [] })),
+    updateSkill: vi.fn(async () => undefined),
+  } as unknown as AdminClient;
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<SkillsPane client={client} tenantId="tenant-1" />); });
+  await flush();
+
+  expect(nodeText(renderer.root)).toContain("role catalog unavailable");
+  expect(nodeText(renderer.root)).toContain("实时工具目录已刷新");
+  expect(nodeText(renderer.root)).toContain("进度模板");
+  await act(async () => { button(renderer.root, "编辑").props.onClick(); });
+  expect(toolCheckbox(renderer.root, "report_production_progress").props.disabled).toBe(false);
+  expect(nodeText(renderer.root)).toContain("订单");
+  expect(button(renderer.root, "保存").props.disabled).toBe(true);
+  await act(async () => { button(renderer.root, "保存").props.onClick(); await Promise.resolve(); });
+  expect(client.updateSkill).not.toHaveBeenCalled();
 });
 
 it("fails closed after a later catalog refresh failure and recovers without deleting historical refs", async () => {

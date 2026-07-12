@@ -8,6 +8,7 @@ interface SkillEditorProps {
   isNew: boolean;
   busy: boolean;
   toolsFresh?: boolean;
+  saveReady?: boolean;
   tools: ToolInfo[];
   roles: Role[];
   domains: Domain[];
@@ -33,12 +34,17 @@ export function unavailableTemplateTools(template: Template, tools: ToolInfo[]):
   return template.allowedTools.filter((name) => !live.has(name));
 }
 
+function settledError(label: string, result: PromiseSettledResult<unknown>): string[] {
+  return result.status === "rejected" ? [`${label}：${String(result.reason)}`] : [];
+}
+
 export function SkillEditor({
   skill,
   originalAllowedTools = skill.allowedTools,
   isNew,
   busy,
   toolsFresh = true,
+  saveReady = toolsFresh,
   tools,
   roles,
   domains,
@@ -116,7 +122,7 @@ export function SkillEditor({
         ))}
       </fieldset>
       <div className="pane-form">
-        <button className="btn-primary" disabled={busy || !toolsFresh || !skill.skillId.trim() || !skill.name.trim() || invalidTools.length > 0}
+        <button className="btn-primary" disabled={busy || !saveReady || !skill.skillId.trim() || !skill.name.trim() || invalidTools.length > 0}
           onClick={onSave}>保存</button>
         <button className="btn" disabled={busy} onClick={onCancel}>取消</button>
       </div>
@@ -134,34 +140,49 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
   const [edit, setEdit] = useState<Skill | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [originalAllowedTools, setOriginalAllowedTools] = useState<string[]>([]);
-  const [toolsFresh, setToolsFresh] = useState(false);
+  const [ready, setReady] = useState({ skills: false, tools: false, roles: false, templates: false, domains: false });
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [ok, setOk] = useState("");
+  const toolsFresh = ready.tools;
+  const editorReady = ready.skills && ready.tools && ready.roles && ready.domains;
+  const cloneReady = ready.tools && ready.templates;
 
   const load = useCallback(async () => {
-    setCatalogLoading(true); setToolsFresh(false); setTools([]); setErr("");
-    try {
-      const [nextSkills, nextTools, nextRoles, nextTemplates, domainData] = await Promise.all([
-        client.listSkills(), client.listTools(), client.listRoles(), client.listTemplates(), client.listDomains(),
-      ]);
-      setSkills(nextSkills); setTools(nextTools); setRoles(nextRoles);
-      setTemplates(nextTemplates); setDomains(domainData.domains);
-      setToolsFresh(true);
-    } catch (error) {
-      setErr(String(error));
-    } finally {
-      setCatalogLoading(false);
-    }
+    setCatalogLoading(true); setErr("");
+    setReady({ skills: false, tools: false, roles: false, templates: false, domains: false });
+    setTools([]); setRoles([]); setTemplates([]); setDomains([]);
+    const [skillResult, toolResult, roleResult, templateResult, domainResult] = await Promise.allSettled([
+      client.listSkills(), client.listTools(), client.listRoles(), client.listTemplates(), client.listDomains(),
+    ] as const);
+    if (skillResult.status === "fulfilled") setSkills(skillResult.value);
+    if (toolResult.status === "fulfilled") setTools(toolResult.value);
+    if (roleResult.status === "fulfilled") setRoles(roleResult.value);
+    if (templateResult.status === "fulfilled") setTemplates(templateResult.value);
+    if (domainResult.status === "fulfilled") setDomains(domainResult.value.domains);
+    setReady({
+      skills: skillResult.status === "fulfilled",
+      tools: toolResult.status === "fulfilled",
+      roles: roleResult.status === "fulfilled",
+      templates: templateResult.status === "fulfilled",
+      domains: domainResult.status === "fulfilled",
+    });
+    const errors = [
+      ...settledError("技能", skillResult), ...settledError("工具", toolResult),
+      ...settledError("角色", roleResult), ...settledError("模板", templateResult),
+      ...settledError("数据域", domainResult),
+    ];
+    setErr(errors.join("；"));
+    setCatalogLoading(false);
   }, [client]);
 
   useEffect(() => { void load(); }, [load, refreshToken]);
 
   const save = async () => {
     if (!edit) return;
-    if (!toolsFresh) {
-      setErr("实时工具目录不可用，无法保存技能");
+    if (!editorReady) {
+      setErr("技能编辑资源未就绪，无法保存技能");
       return;
     }
     const invalid = unavailableToolReferences(edit.allowedTools, originalAllowedTools, tools);
@@ -186,6 +207,10 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
     const template = templates.find((candidate) => candidate.templateId === templateId);
     if (!toolsFresh) {
       setErr("实时工具目录尚未刷新，无法克隆模板");
+      return;
+    }
+    if (!ready.templates) {
+      setErr("模板目录尚未刷新，无法克隆模板");
       return;
     }
     if (!template) {
@@ -227,20 +252,24 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
       {err && <div className="pane-err" role="alert">{err}</div>}
       {ok && <div className="pane-ok" role="status">{ok}</div>}
       <div className="pane-form" role="status">
-        <span>{catalogLoading ? "正在刷新实时工具目录…" : toolsFresh ? "实时工具目录已刷新" : "实时工具目录不可用，新增、保存与克隆已禁用"}</span>
+        <span>{catalogLoading
+          ? "正在刷新管理资源…"
+          : toolsFresh
+            ? editorReady ? "实时工具目录已刷新" : "实时工具目录已刷新 · 技能编辑资源未就绪，保存已禁用"
+            : "实时工具目录不可用，新增、保存与克隆已禁用"}</span>
         <button className="btn" disabled={busy || catalogLoading} onClick={() => void load()}>刷新工具目录</button>
       </div>
       <div className="pane-form skill-create-actions">
         <button className="btn" disabled={busy || edit !== null}
           onClick={() => { setEdit(newSkillDraft(tenantId)); setOriginalAllowedTools([]); setIsNew(true); }}>新建空白技能</button>
-        <select value={templateId} disabled={busy} onChange={(event) => setTemplateId(event.target.value)}>
+        <select value={templateId} disabled={busy || !ready.templates} onChange={(event) => setTemplateId(event.target.value)}>
           <option value="">从模板新建…</option>
           {templates.map((template) => (
             <option key={template.templateId} value={template.templateId}>{template.name} ({template.templateId})</option>
           ))}
         </select>
         <button className="btn-primary" onClick={() => void clone()}
-          disabled={busy || !toolsFresh || !templateId || templates.length === 0}>克隆</button>
+          disabled={busy || !cloneReady || !templateId || templates.length === 0}>克隆</button>
       </div>
       <ul className="pane-list skill-list">
         {skills.map((skill) => (
@@ -258,7 +287,7 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
         ))}
       </ul>
       {edit && (
-        <SkillEditor skill={edit} originalAllowedTools={originalAllowedTools} isNew={isNew} busy={busy} toolsFresh={toolsFresh} tools={tools} roles={roles} domains={domains}
+        <SkillEditor skill={edit} originalAllowedTools={originalAllowedTools} isNew={isNew} busy={busy} toolsFresh={toolsFresh} saveReady={editorReady} tools={tools} roles={roles} domains={domains}
           onChange={setEdit} onSave={() => void save()}
           onCancel={() => { setEdit(null); setIsNew(false); }} />
       )}
