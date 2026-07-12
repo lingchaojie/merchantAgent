@@ -82,6 +82,24 @@ func TestCredentialVerifierFailsClosed(t *testing.T) {
 	}
 }
 
+func TestVerifySubmissionTreatsCredentialExpiryAsExclusive(t *testing.T) {
+	now := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	credential, devicePrivate, verifier := signedFixtureCredential(t, now, "mock-corp-001", "device-01")
+	claims, err := verifier.Verify(now, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := validSubmittedVersion()
+	expiresAt := time.Unix(claims.ExpiresAt, 0).UTC()
+	justBeforeExpiry := expiresAt.Add(-time.Nanosecond)
+	if err := verifier.VerifySubmission(expiresAt.Add(-time.Minute), claims, v, justBeforeExpiry, signDigest(t, devicePrivate, v, justBeforeExpiry)); err != nil {
+		t.Fatalf("immediately before expiry: %v", err)
+	}
+	if err := verifier.VerifySubmission(expiresAt.Add(-time.Minute), claims, v, expiresAt, signDigest(t, devicePrivate, v, expiresAt)); !errors.Is(err, ErrAttestationScope) {
+		t.Fatalf("at expiry error=%v", err)
+	}
+}
+
 func signedFixtureCredential(t *testing.T, now time.Time, tenant, device string) (string, ed25519.PrivateKey, CredentialVerifier) {
 	t.Helper()
 	platformPublic, platformPrivate, err := ed25519.GenerateKey(rand.Reader)

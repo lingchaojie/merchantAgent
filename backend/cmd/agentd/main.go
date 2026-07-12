@@ -11,9 +11,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -48,15 +50,16 @@ func main() {
 	prov := provider.NewOpenAI(envOr("LLM_BASE_URL", "https://www.linx2.ai"), key, envOr("LLM_MODEL", "gpt-5.5"))
 
 	dataDir := envOr("DATA_DIR", "")
-	configDB, skillDB, connectorDB := os.Getenv("CONFIG_DB"), os.Getenv("SKILL_DB"), os.Getenv("CONNECTOR_DB")
+	configDB, skillDB := os.Getenv("CONFIG_DB"), os.Getenv("SKILL_DB")
 	if configDB == "" && dataDir != "" {
 		configDB = dataDir + "/config.db"
 	}
 	if skillDB == "" && dataDir != "" {
 		skillDB = dataDir + "/skills.db"
 	}
-	if connectorDB == "" && dataDir != "" {
-		connectorDB = dataDir + "/connectors.db"
+	connectorDB, err := resolveConnectorDB(os.Getenv("CONNECTOR_DB"), dataDir)
+	if err != nil {
+		log.Fatalf("connector registry: %v", err)
 	}
 	platformPublicKey, err := loadImplementationPublicKey(os.Getenv("IMPLEMENTATION_PUBLIC_KEY_FILE"))
 	if err != nil {
@@ -132,6 +135,16 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func resolveConnectorDB(explicit, dataDir string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	if dataDir != "" {
+		return filepath.Join(dataDir, "connectors.db"), nil
+	}
+	return "", errors.New("CONNECTOR_DB or DATA_DIR is required")
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

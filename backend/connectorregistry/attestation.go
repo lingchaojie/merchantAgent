@@ -93,7 +93,7 @@ func (v CredentialVerifier) VerifySubmission(now time.Time, claims Implementatio
 	signedAt = signedAt.UTC()
 	issuedAt := time.Unix(claims.IssuedAt, 0).UTC()
 	expiresAt := time.Unix(claims.ExpiresAt, 0).UTC()
-	if signedAt.Before(issuedAt) || signedAt.After(expiresAt) || signedAt.After(now.UTC().Add(5*time.Minute)) {
+	if signedAt.Before(issuedAt) || !signedAt.Before(expiresAt) || signedAt.After(now.UTC().Add(5*time.Minute)) {
 		return ErrAttestationScope
 	}
 	deviceKey, err := parseEd25519PublicKey([]byte(claims.DeviceKey))

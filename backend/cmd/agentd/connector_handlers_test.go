@@ -21,6 +21,31 @@ import (
 	"github.com/merchantagent/backend/wire"
 )
 
+func TestResolveConnectorDB(t *testing.T) {
+	tests := []struct {
+		name, explicit, dataDir, want string
+		wantErr                       bool
+	}{
+		{name: "explicit path", explicit: "/secure/registry.db", dataDir: "/ignored", want: "/secure/registry.db"},
+		{name: "data directory", dataDir: "/var/lib/merchantagent", want: filepath.Join("/var/lib/merchantagent", "connectors.db")},
+		{name: "missing persistent path", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveConnectorDB(tc.explicit, tc.dataDir)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveConnectorDB()=%q, want error", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("resolveConnectorDB()=%q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestConnectorRoutesSeparateImplementerAndAdminAuthority(t *testing.T) {
 	s, credential, version := connectorTestServer(t)
 	publicBody := signedSubmissionBody(t, credential, version)
