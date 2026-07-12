@@ -3,9 +3,11 @@
 .workbench-shell.locked { display: flex; flex-direction: column; }
 .wb-banner { min-height: 30px; padding: 6px 18px; background: var(--amber-soft); border-bottom: 1px solid rgba(226,163,54,.28); color: var(--amber); font-size: 12px; text-align: center; }
 .wb-topbar { min-height: 66px; display: flex; align-items: center; gap: 20px; padding: 10px 20px; border-bottom: 1px solid var(--border); }
+.wb-topbar > div { min-width: 0; }
 .wb-topbar h1, .wb-unlock h1 { margin: 1px 0 0; font-size: 17px; letter-spacing: 0; }
 .wb-eyebrow { color: var(--text-tertiary); font-size: 10px; text-transform: uppercase; }
 .wb-session { margin-left: auto; display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px 14px; color: var(--text-secondary); font-size: 12px; }
+.wb-session span { overflow-wrap: anywhere; }
 .wb-tabs { height: 42px; display: flex; padding: 0 20px; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .wb-tabs button, .wb-operation-switch button, .wb-segment button { border: 0; background: transparent; color: var(--text-secondary); white-space: nowrap; }
 .wb-tabs button { padding: 0 16px; border-bottom: 2px solid transparent; }
@@ -31,6 +33,8 @@
 .wb-credential-tool { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; align-items: end; gap: 12px; padding: 14px; margin-top: 8px; border: 1px solid var(--border); border-radius: 7px; }
 .wb-credential-tool .wb-field { margin: 0; }
 .wb-test-actions, .wb-freeze-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.wb-evidence-status { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; color: var(--text-tertiary); font-size: 11px; }
+.wb-evidence-status span { padding: 3px 7px; border-radius: 5px; background: var(--bg-elevated); }
 .wb-ok, .wb-error { padding: 8px 12px; margin: 10px 20px; border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
 .wb-ok { margin-left: 0; margin-right: 0; color: var(--green); background: var(--green-soft); }
 .wb-error { color: #f2a7a9; background: var(--red-soft); }

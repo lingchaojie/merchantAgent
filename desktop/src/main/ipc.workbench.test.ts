@@ -34,6 +34,53 @@ describe("isolated Workbench IPC", () => {
     expect(Object.values(Channels)).not.toContain(WorkbenchChannels.testOperation);
   });
 
+  it("projects connector registry responses before they cross into the ordinary renderer", async () => {
+    agentd.client.adminRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: [{
+        tenantId: "tenant-1", connectorId: "sql-orders", version: "1.0.0",
+        digest: `sha256:${"a".repeat(64)}`, adapter: "sqlserver", environment: "test",
+        status: "pending_admin_approval", submittedBy: "implementation-1",
+        implementationCredentialId: "private-credential", deviceId: "private-device",
+        createdAt: "private-time", unknown: "private-unknown",
+        checks: { checkerVersion: "checker-1", rulesetVersion: "m7.1-sql-v1", testsDigest: "sha256:tests", privateCheck: true },
+        contract: { tools: [{
+          name: "query_order_status", description: "query", execution: "desktop",
+          resourceType: "business_record", resourceKind: "order", resourceArg: "orderId",
+          resourceRelation: "viewer", dataDomain: "orders",
+          params: [{ name: "orderId", description: "id", type: "string", required: true, privateParam: "drop" }],
+          resultFields: ["orderId", "status"], risk: "read", requiresConfirmation: false,
+          timeoutMS: 5_000, maxResults: 10, sql: "SELECT secret",
+        }], privateContract: true },
+      }],
+    });
+    register({} as never, { execute: vi.fn() } as never);
+
+    const response = await handler(Channels.admin)({}, {
+      method: "GET", path: "/admin/connectors", userId: "u_admin",
+    });
+
+    expect(response).toEqual({
+      ok: true,
+      data: [{
+        tenantId: "tenant-1", connectorId: "sql-orders", version: "1.0.0",
+        digest: `sha256:${"a".repeat(64)}`, adapter: "sqlserver", environment: "test",
+        status: "pending_admin_approval", submittedBy: "implementation-1",
+        checks: { checkerVersion: "checker-1", rulesetVersion: "m7.1-sql-v1", testsDigest: "sha256:tests" },
+        contract: { tools: [{
+          name: "query_order_status", description: "query", execution: "desktop",
+          resourceType: "business_record", resourceKind: "order", resourceArg: "orderId",
+          resourceRelation: "viewer", dataDomain: "orders",
+          params: [{ name: "orderId", description: "id", type: "string", required: true }],
+          resultFields: ["orderId", "status"], risk: "read", requiresConfirmation: false,
+          timeoutMS: 5_000, maxResults: 10,
+        }] },
+      }],
+    });
+    expect(JSON.stringify(response)).not.toMatch(/private|SELECT|deviceId|implementationCredentialId/);
+  });
+
   it("maps dedicated closed commands and removes every handler in reverse order", async () => {
     const service = {
       getEnrollment: vi.fn(async () => ({ deviceId: "d", devicePublicKeyPem: "pem", fingerprint: "fp" })),

@@ -4,16 +4,31 @@ import type { AdminClient, ConnectorVersionView, PublicToolContract } from "../.
 
 export type ConnectorLifecycleAction = "publish" | "suspend" | "revoke";
 
+export interface ConnectorLifecycleRefresh {
+  connectors?: ConnectorVersionView[];
+  errors: string[];
+}
+
 export async function runConnectorLifecycleAction(
   client: AdminClient,
   connector: ConnectorVersionView,
   action: ConnectorLifecycleAction,
-): Promise<ConnectorVersionView[]> {
+  onTransition?: () => void,
+): Promise<ConnectorLifecycleRefresh> {
   if (action === "publish") await client.publishConnector(connector.connectorId, connector.version);
   else if (action === "suspend") await client.suspendConnector(connector.connectorId, connector.version);
   else await client.revokeConnector(connector.connectorId, connector.version);
-  const [connectors] = await Promise.all([client.listConnectors(), client.listTools()]);
-  return connectors;
+  onTransition?.();
+  const [connectorRefresh, toolRefresh] = await Promise.allSettled([
+    client.listConnectors(), client.listTools(),
+  ]);
+  const errors = [connectorRefresh, toolRefresh]
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => String(result.reason));
+  return {
+    ...(connectorRefresh.status === "fulfilled" ? { connectors: connectorRefresh.value } : {}),
+    errors,
+  };
 }
 
 function riskLabel(tool: PublicToolContract): string {
@@ -92,6 +107,7 @@ export function ConnectorVersionCard({
 export function ConnectorsPane({ client, onLifecycle }: { client: AdminClient; onLifecycle?: () => void }): JSX.Element {
   const [connectors, setConnectors] = useState<ConnectorVersionView[]>([]);
   const [busyId, setBusyId] = useState("");
+  const [staleIds, setStaleIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
@@ -103,11 +119,22 @@ export function ConnectorsPane({ client, onLifecycle }: { client: AdminClient; o
   const action = async (connector: ConnectorVersionView, transition: ConnectorLifecycleAction) => {
     if (transition === "revoke" && !window.confirm(`确认永久撤销 ${connector.connectorId}@${connector.version}？`)) return;
     const id = `${connector.connectorId}@${connector.version}`;
-    setBusyId(id); setError("");
+    setBusyId(id); setError(""); setStaleIds((current) => new Set(current).add(id));
     try {
-      setConnectors(await runConnectorLifecycleAction(client, connector, transition));
-      onLifecycle?.();
-    } catch (e) { setError(String(e)); }
+      const refreshed = await runConnectorLifecycleAction(client, connector, transition, onLifecycle);
+      if (refreshed.connectors) {
+        setConnectors(refreshed.connectors);
+        setStaleIds((current) => {
+          const next = new Set(current); next.delete(id); return next;
+        });
+      }
+      if (refreshed.errors.length > 0) setError(refreshed.errors.join("；"));
+    } catch (e) {
+      setStaleIds((current) => {
+        const next = new Set(current); next.delete(id); return next;
+      });
+      setError(String(e));
+    }
     finally { setBusyId(""); }
   };
 
@@ -115,11 +142,11 @@ export function ConnectorsPane({ client, onLifecycle }: { client: AdminClient; o
     <div className="pane connectors-pane">
       <h2 className="pane-title">连接器审批</h2>
       <p className="pane-caption">仅审核公开工具契约与校验摘要。本地实现配置不会显示在此处。</p>
-      {error && <div className="pane-err">{error}</div>}
+      {error && <div className="pane-err" role="alert">{error}</div>}
       {connectors.length === 0 && !error && <div className="connector-empty">暂无待审核或已发布的连接器。</div>}
       <div className="connector-list">{connectors.map((connector) => {
         const id = `${connector.connectorId}@${connector.version}`;
-        return <ConnectorVersionCard key={id} connector={connector} busy={busyId === id}
+        return <ConnectorVersionCard key={id} connector={connector} busy={busyId === id || staleIds.has(id)}
           onAction={(transition) => void action(connector, transition)} />;
       })}</div>
     </div>

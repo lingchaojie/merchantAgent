@@ -1,10 +1,20 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { expect, it, vi } from "vitest";
-import type { Skill, ToolInfo } from "../../admin";
-import { SkillEditor, unavailableToolReferences } from "./SkillsPane";
+import type { AdminClient, Skill, ToolInfo } from "../../admin";
+import { SkillEditor, SkillsPane, unavailableToolReferences } from "./SkillsPane";
 
 const css = readFileSync(new URL("../../app.css", import.meta.url), "utf8");
+
+function nodeText(node: ReactTestInstance | string | number): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  return node.children.map((child) => nodeText(child as ReactTestInstance | string | number)).join("");
+}
+
+async function flush(): Promise<void> {
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+}
 
 it("renders every editable skill field and supplied domains", () => {
   const html = renderToStaticMarkup(
@@ -155,4 +165,36 @@ it("does not allow a removed historical tool to be selected again", () => {
     />,
   );
   expect(html).toMatch(/unavailable-tool[^>]*>\s*<input type="checkbox" disabled/);
+});
+
+it("rejects template cloning when the template references unavailable live tools", async () => {
+  const client = {
+    listSkills: vi.fn(async () => []),
+    listTools: vi.fn(async () => [progressTool]),
+    listRoles: vi.fn(async () => []),
+    listTemplates: vi.fn(async () => [{
+      templateId: "restricted-template",
+      name: "受限模板",
+      description: "",
+      playbookMd: "",
+      allowedTools: ["report_production_progress", "unpublished_tool"],
+      dataDomains: [],
+      suggestedRoles: [],
+    }]),
+    listDomains: vi.fn(async () => ({ domains: [], grants: [] })),
+    cloneTemplate: vi.fn(async () => undefined),
+  } as unknown as AdminClient;
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<SkillsPane client={client} tenantId="tenant-1" />); });
+  await flush();
+
+  const select = renderer.root.findByType("select");
+  await act(async () => { select.props.onChange({ target: { value: "restricted-template" } }); });
+  const clone = renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "克隆")!;
+  await act(async () => { clone.props.onClick(); await Promise.resolve(); });
+
+  expect(client.cloneTemplate).not.toHaveBeenCalled();
+  expect(nodeText(renderer.root)).toContain("unpublished_tool");
+  expect(renderer.root.findAllByProps({ role: "alert" })).toHaveLength(1);
 });

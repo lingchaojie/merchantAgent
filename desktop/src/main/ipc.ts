@@ -32,6 +32,107 @@ import {
 
 const DEFAULT_LOCAL_TOOL_CONFIRMATION_TIMEOUT_MS = 105_000;
 
+function publicRecord(value: unknown, name: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(name);
+  return value as Record<string, unknown>;
+}
+
+function publicString(value: unknown, name: string): string {
+  if (typeof value !== "string") throw new Error(name);
+  return value;
+}
+
+function publicNumber(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(name);
+  return value;
+}
+
+function publicBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw new Error(name);
+  return value;
+}
+
+function optionalNumber(record: Record<string, unknown>, key: string): Record<string, number> {
+  return record[key] === undefined ? {} : { [key]: publicNumber(record[key], "connector_response_invalid") };
+}
+
+function projectPublicParameter(value: unknown): Record<string, unknown> {
+  const parameter = publicRecord(value, "connector_response_invalid");
+  const enumValues = parameter.enum;
+  if (enumValues !== undefined && (!Array.isArray(enumValues) || enumValues.some((item) =>
+    typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean"))) {
+    throw new Error("connector_response_invalid");
+  }
+  return {
+    name: publicString(parameter.name, "connector_response_invalid"),
+    description: publicString(parameter.description, "connector_response_invalid"),
+    type: publicString(parameter.type, "connector_response_invalid"),
+    required: publicBoolean(parameter.required, "connector_response_invalid"),
+    ...optionalNumber(parameter, "minLength"), ...optionalNumber(parameter, "maxLength"),
+    ...optionalNumber(parameter, "minimum"), ...optionalNumber(parameter, "maximum"),
+    ...(enumValues === undefined ? {} : { enum: [...enumValues] }),
+  };
+}
+
+function projectPublicTool(value: unknown): Record<string, unknown> {
+  const tool = publicRecord(value, "connector_response_invalid");
+  if (!Array.isArray(tool.params) || !Array.isArray(tool.resultFields)) throw new Error("connector_response_invalid");
+  return {
+    name: publicString(tool.name, "connector_response_invalid"),
+    description: publicString(tool.description, "connector_response_invalid"),
+    execution: publicString(tool.execution, "connector_response_invalid"),
+    resourceType: publicString(tool.resourceType, "connector_response_invalid"),
+    resourceKind: publicString(tool.resourceKind, "connector_response_invalid"),
+    resourceArg: publicString(tool.resourceArg, "connector_response_invalid"),
+    resourceRelation: publicString(tool.resourceRelation, "connector_response_invalid"),
+    dataDomain: publicString(tool.dataDomain, "connector_response_invalid"),
+    params: tool.params.map(projectPublicParameter),
+    resultFields: tool.resultFields.map((field) => publicString(field, "connector_response_invalid")),
+    risk: publicString(tool.risk, "connector_response_invalid"),
+    requiresConfirmation: publicBoolean(tool.requiresConfirmation, "connector_response_invalid"),
+    timeoutMS: publicNumber(tool.timeoutMS, "connector_response_invalid"),
+    maxResults: publicNumber(tool.maxResults, "connector_response_invalid"),
+  };
+}
+
+function projectPublicConnector(value: unknown): Record<string, unknown> {
+  const connector = publicRecord(value, "connector_response_invalid");
+  const checks = publicRecord(connector.checks, "connector_response_invalid");
+  const contract = publicRecord(connector.contract, "connector_response_invalid");
+  if (!Array.isArray(contract.tools)) throw new Error("connector_response_invalid");
+  const approvedBy = connector.approvedBy;
+  return {
+    tenantId: publicString(connector.tenantId, "connector_response_invalid"),
+    connectorId: publicString(connector.connectorId, "connector_response_invalid"),
+    version: publicString(connector.version, "connector_response_invalid"),
+    digest: publicString(connector.digest, "connector_response_invalid"),
+    adapter: publicString(connector.adapter, "connector_response_invalid"),
+    environment: publicString(connector.environment, "connector_response_invalid"),
+    status: publicString(connector.status, "connector_response_invalid"),
+    checks: {
+      checkerVersion: publicString(checks.checkerVersion, "connector_response_invalid"),
+      rulesetVersion: publicString(checks.rulesetVersion, "connector_response_invalid"),
+      testsDigest: publicString(checks.testsDigest, "connector_response_invalid"),
+    },
+    contract: { tools: contract.tools.map(projectPublicTool) },
+    submittedBy: publicString(connector.submittedBy, "connector_response_invalid"),
+    ...(approvedBy === undefined || approvedBy === "" ? {} : {
+      approvedBy: publicString(approvedBy, "connector_response_invalid"),
+    }),
+  };
+}
+
+function projectAdminResponse(req: AdminReq, data: unknown): unknown {
+  if (req.method === "GET" && req.path === "/admin/connectors") {
+    if (!Array.isArray(data)) throw new Error("connector_response_invalid");
+    return data.map(projectPublicConnector);
+  }
+  if (req.method === "POST" && /^\/admin\/connectors\/[^/]+\/versions\/[^/]+\/(?:publish|suspend|revoke)$/.test(req.path)) {
+    return undefined;
+  }
+  return data;
+}
+
 function closedWorkbenchRequest(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("workbench_invalid_request");
@@ -209,7 +310,12 @@ export function register(
     // returned as a typed AdminResp (never thrown across the bridge).
     install(Channels.admin, async (_e, req: AdminReq): Promise<AdminResp> => {
       const r = await client.adminRequest(req);
-      return r.ok ? { ok: true, data: r.data } : { ok: false, status: r.status, error: r.error || "error" };
+      if (!r.ok) return { ok: false, status: r.status, error: r.error || "error" };
+      try {
+        return { ok: true, data: projectAdminResponse(req, r.data) };
+      } catch {
+        return { ok: false, status: 502, error: "connector_response_invalid" };
+      }
     });
     if (options.openWorkbench !== undefined) {
       install(Channels.openWorkbench, () => options.openWorkbench?.());

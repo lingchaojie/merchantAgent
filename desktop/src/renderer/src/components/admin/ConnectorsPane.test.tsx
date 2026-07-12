@@ -1,8 +1,20 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it, vi } from "vitest";
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
+import { afterEach, expect, it, vi } from "vitest";
 
 import type { AdminClient, ConnectorVersionView } from "../../admin";
-import { ConnectorVersionCard, runConnectorLifecycleAction } from "./ConnectorsPane";
+import { ConnectorVersionCard, ConnectorsPane, runConnectorLifecycleAction } from "./ConnectorsPane";
+
+function nodeText(node: ReactTestInstance | string | number): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  return node.children.map((child) => nodeText(child as ReactTestInstance | string | number)).join("");
+}
+
+async function flush(): Promise<void> {
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+}
+
+afterEach(() => vi.unstubAllGlobals());
 
 function pendingContract(): ConnectorVersionView {
   return {
@@ -62,5 +74,78 @@ it("invalidates connectors and live tools after lifecycle transitions", async ()
 
   expect(client.publishConnector).toHaveBeenCalledWith("sql-orders", "1.0.0");
   expect(client.listConnectors).toHaveBeenCalledOnce();
+  expect(client.listTools).toHaveBeenCalledOnce();
+});
+
+it("notifies Skills and disables stale lifecycle actions when connector refresh fails", async () => {
+  const connector = pendingContract();
+  const client = {
+    listConnectors: vi.fn()
+      .mockResolvedValueOnce([connector])
+      .mockRejectedValueOnce(new Error("connector reload failed")),
+    listTools: vi.fn(async () => []),
+    publishConnector: vi.fn(async () => undefined),
+  } as unknown as AdminClient;
+  const onLifecycle = vi.fn();
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<ConnectorsPane client={client} onLifecycle={onLifecycle} />); });
+  await flush();
+
+  const publish = renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "发布")!;
+  await act(async () => { publish.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+  await flush();
+
+  expect(client.publishConnector).toHaveBeenCalledWith("sql-orders", "1.0.0");
+  expect(onLifecycle).toHaveBeenCalledOnce();
+  expect(nodeText(renderer.root)).toContain("connector reload failed");
+  expect(renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "发布")?.props.disabled).toBe(true);
+});
+
+it("applies a successful connector refresh when only the tool refresh fails", async () => {
+  const connector = pendingContract();
+  const published = { ...connector, status: "published" as const, approvedBy: "admin-1" };
+  const client = {
+    listConnectors: vi.fn().mockResolvedValueOnce([connector]).mockResolvedValueOnce([published]),
+    listTools: vi.fn().mockRejectedValueOnce(new Error("tool reload failed")),
+    publishConnector: vi.fn(async () => undefined),
+  } as unknown as AdminClient;
+  const onLifecycle = vi.fn();
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<ConnectorsPane client={client} onLifecycle={onLifecycle} />); });
+  await flush();
+
+  const publish = renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "发布")!;
+  await act(async () => { publish.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+  await flush();
+
+  expect(onLifecycle).toHaveBeenCalledOnce();
+  expect(nodeText(renderer.root)).toContain("tool reload failed");
+  expect(renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "暂停")?.props.disabled).toBe(false);
+});
+
+it("confirms revoke before transitioning and refreshes both registries", async () => {
+  vi.stubGlobal("window", { confirm: vi.fn(() => true) });
+  const connector = { ...pendingContract(), status: "published" as const };
+  const client = {
+    listConnectors: vi.fn().mockResolvedValueOnce([connector]).mockResolvedValueOnce([]),
+    listTools: vi.fn(async () => []),
+    revokeConnector: vi.fn(async () => undefined),
+  } as unknown as AdminClient;
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<ConnectorsPane client={client} />); });
+  await flush();
+
+  const revoke = renderer.root.findAllByType("button")
+    .find((candidate) => nodeText(candidate) === "撤销")!;
+  await act(async () => { revoke.props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+  await flush();
+
+  expect(window.confirm).toHaveBeenCalledOnce();
+  expect(client.revokeConnector).toHaveBeenCalledWith("sql-orders", "1.0.0");
+  expect(client.listConnectors).toHaveBeenCalledTimes(2);
   expect(client.listTools).toHaveBeenCalledOnce();
 });

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const css = readFileSync(new URL("./app.css", import.meta.url), "utf8");
+const workbenchCss = readFileSync(new URL("./workbench/workbench.css", import.meta.url), "utf8");
 const mobile = css.slice(css.lastIndexOf("@media (max-width: 760px)"));
 
 describe("mobile shell CSS", () => {
@@ -24,5 +25,10 @@ describe("mobile shell CSS", () => {
     expect(mobile).toMatch(/\.connectors-pane\s*\{[^}]*max-width:\s*100%;/s);
     expect(mobile).toMatch(/\.connector-meta\s*\{[^}]*grid-template-columns:\s*1fr;/s);
     expect(mobile).toMatch(/\.topbar-right\s*\{[^}]*min-width:\s*0;/s);
+  });
+
+  it("contains long Workbench session and header text", () => {
+    expect(workbenchCss).toMatch(/\.wb-topbar\s*>\s*div\s*\{[^}]*min-width:\s*0;/s);
+    expect(workbenchCss).toMatch(/\.wb-session\s+span\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
   });
 });

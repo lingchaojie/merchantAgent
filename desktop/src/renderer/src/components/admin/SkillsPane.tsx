@@ -27,6 +27,11 @@ export function unavailableToolReferences(
   return selected.filter((name) => !live.has(name) && !historical.has(name));
 }
 
+export function unavailableTemplateTools(template: Template, tools: ToolInfo[]): string[] {
+  const live = new Set(tools.map((tool) => tool.name));
+  return template.allowedTools.filter((name) => !live.has(name));
+}
+
 export function SkillEditor({
   skill,
   originalAllowedTools = skill.allowedTools,
@@ -127,17 +132,20 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
   const [edit, setEdit] = useState<Skill | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [originalAllowedTools, setOriginalAllowedTools] = useState<string[]>([]);
+  const [toolsFresh, setToolsFresh] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [ok, setOk] = useState("");
 
   const load = useCallback(async () => {
+    setToolsFresh(false);
     try {
       const [nextSkills, nextTools, nextRoles, nextTemplates, domainData] = await Promise.all([
         client.listSkills(), client.listTools(), client.listRoles(), client.listTemplates(), client.listDomains(),
       ]);
       setSkills(nextSkills); setTools(nextTools); setRoles(nextRoles);
       setTemplates(nextTemplates); setDomains(domainData.domains);
+      setToolsFresh(true);
     } catch (error) {
       setErr(String(error));
     }
@@ -166,6 +174,20 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
 
   const clone = async () => {
     if (!templateId) return;
+    const template = templates.find((candidate) => candidate.templateId === templateId);
+    if (!toolsFresh) {
+      setErr("实时工具目录尚未刷新，无法克隆模板");
+      return;
+    }
+    if (!template) {
+      setErr("所选模板已不可用");
+      return;
+    }
+    const unavailable = unavailableTemplateTools(template, tools);
+    if (unavailable.length > 0) {
+      setErr(`模板包含未发布工具：${unavailable.join("、")}`);
+      return;
+    }
     setBusy(true); setErr(""); setOk("");
     try {
       await client.cloneTemplate(templateId);
@@ -193,8 +215,8 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
   return (
     <div className="pane">
       <h3 className="pane-title">技能</h3>
-      {err && <div className="pane-err">{err}</div>}
-      {ok && <div className="pane-ok">{ok}</div>}
+      {err && <div className="pane-err" role="alert">{err}</div>}
+      {ok && <div className="pane-ok" role="status">{ok}</div>}
       <div className="pane-form skill-create-actions">
         <button className="btn" disabled={busy || edit !== null}
           onClick={() => { setEdit(newSkillDraft(tenantId)); setOriginalAllowedTools([]); setIsNew(true); }}>新建空白技能</button>
@@ -205,7 +227,7 @@ export function SkillsPane({ client, tenantId, refreshToken = 0 }: { client: Adm
           ))}
         </select>
         <button className="btn-primary" onClick={() => void clone()}
-          disabled={busy || !templateId || templates.length === 0}>克隆</button>
+          disabled={busy || !toolsFresh || !templateId || templates.length === 0}>克隆</button>
       </div>
       <ul className="pane-list skill-list">
         {skills.map((skill) => (
