@@ -31,6 +31,73 @@ function requireLocalCertificatePath(caPath: string): void {
   }
 }
 
+function requireRegularCertificateFile(stat: fs.BigIntStats): void {
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("invalid CA file");
+}
+
+function sameFileIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  if (left.dev !== right.dev || left.ino !== right.ino) return false;
+  return left.ino !== 0n || left.birthtimeNs === right.birthtimeNs;
+}
+
+function readLocalCertificate(caPath: string): Buffer {
+  let descriptor: number | undefined;
+  let scratch: Buffer | undefined;
+  let certificate: Buffer | undefined;
+  let failed = false;
+  try {
+    const before = fs.lstatSync(caPath, { bigint: true });
+    requireRegularCertificateFile(before);
+    descriptor = fs.openSync(caPath, fs.constants.O_RDONLY);
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    requireRegularCertificateFile(opened);
+    if (
+      opened.size < 1n ||
+      opened.size > BigInt(MAX_CA_BYTES) ||
+      !sameFileIdentity(before, opened)
+    ) {
+      throw new Error("invalid CA file");
+    }
+
+    scratch = Buffer.alloc(MAX_CA_BYTES + 1);
+    const bytesRead = fs.readSync(descriptor, scratch, 0, scratch.length, 0);
+    if (
+      bytesRead < 1 ||
+      bytesRead > MAX_CA_BYTES ||
+      BigInt(bytesRead) !== opened.size
+    ) {
+      throw new Error("invalid CA file");
+    }
+
+    const handleAfterRead = fs.fstatSync(descriptor, { bigint: true });
+    requireRegularCertificateFile(handleAfterRead);
+    const pathAfterRead = fs.lstatSync(caPath, { bigint: true });
+    requireRegularCertificateFile(pathAfterRead);
+    if (
+      handleAfterRead.size !== opened.size ||
+      pathAfterRead.size !== opened.size ||
+      !sameFileIdentity(opened, handleAfterRead) ||
+      !sameFileIdentity(opened, pathAfterRead)
+    ) {
+      throw new Error("invalid CA file");
+    }
+    certificate = Buffer.from(scratch.subarray(0, bytesRead));
+  } catch {
+    failed = true;
+  } finally {
+    scratch?.fill(0);
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        failed = true;
+      }
+    }
+  }
+  if (failed || certificate === undefined) throw tlsFailure();
+  return certificate;
+}
+
 export function validateSQLServerProfile(profile: SQLServerProfile): void {
   if (typeof profile !== "object" || profile === null || Array.isArray(profile)) {
     throw new ConnectorError("invalid_argument", "SQL Server profile is invalid");
@@ -82,19 +149,7 @@ export function toMSSQLConfig(
   ) {
     throw new ConnectorError("invalid_credentials", "SQL Server service credential is invalid");
   }
-  let ca: Buffer | undefined;
-  if (profile.caPath !== undefined) {
-    try {
-      const stat = fs.lstatSync(profile.caPath);
-      if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 1 || stat.size > MAX_CA_BYTES) {
-        throw new Error("invalid CA file");
-      }
-      ca = fs.readFileSync(profile.caPath);
-      if (ca.length < 1 || ca.length > MAX_CA_BYTES) throw new Error("invalid CA file");
-    } catch {
-      throw tlsFailure();
-    }
-  }
+  const ca = profile.caPath === undefined ? undefined : readLocalCertificate(profile.caPath);
   return {
     user: credential.username,
     password: credential.password,

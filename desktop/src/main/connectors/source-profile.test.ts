@@ -1,10 +1,34 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { toMSSQLConfig, validateSQLServerProfile } from "./source-profile";
 import type { SQLServerProfile } from "./schema";
+
+const MAX_CA_BYTES = 256 * 1024;
+
+function fakeBigIntStats(options: {
+  ino?: bigint;
+  size?: bigint;
+  symlink?: boolean;
+  file?: boolean;
+} = {}): fs.BigIntStats {
+  const ino = options.ino ?? 101n;
+  return {
+    dev: 7n,
+    ino,
+    size: options.size ?? 7n,
+    birthtimeNs: 1_000n + ino,
+    ctimeNs: 2_000n,
+    isFile: () => options.file ?? true,
+    isSymbolicLink: () => options.symlink ?? false,
+  } as fs.BigIntStats;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function fixtureProfile(): SQLServerProfile {
   return {
@@ -200,6 +224,77 @@ describe("toMSSQLConfig", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("bounds a file that grows after fstat to MAX_CA_BYTES plus one", () => {
+    const before = fakeBigIntStats({ size: 7n });
+    vi.spyOn(fs, "lstatSync").mockReturnValue(before as never);
+    vi.spyOn(fs, "openSync").mockReturnValue(41);
+    vi.spyOn(fs, "fstatSync").mockReturnValue(before as never);
+    let requestedLength = 0;
+    vi.spyOn(fs, "readSync").mockImplementation(((_fd: number, _buffer: Buffer, _offset: number, length: number) => {
+      requestedLength = length;
+      return MAX_CA_BYTES + 1;
+    }) as never);
+    const close = vi.spyOn(fs, "closeSync").mockImplementation(() => undefined);
+
+    expect(() =>
+      toMSSQLConfig(
+        { ...fixtureProfile(), caPath: "C:\\certs\\ca.pem" },
+        { username: "agent_test", password: "S3cret!" },
+      ),
+    ).toThrowError("tls_failed");
+    expect(requestedLength).toBe(MAX_CA_BYTES + 1);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["symlink", fakeBigIntStats({ symlink: true, file: false })],
+    ["different inode", fakeBigIntStats({ ino: 202n })],
+  ])("rejects a path swap to a %s after the handle read", (_name, after) => {
+    const contents = Buffer.from("TEST CA", "utf8");
+    const original = fakeBigIntStats({ size: BigInt(contents.length) });
+    vi.spyOn(fs, "lstatSync")
+      .mockReturnValueOnce(original as never)
+      .mockReturnValueOnce(after as never);
+    vi.spyOn(fs, "openSync").mockReturnValue(42);
+    vi.spyOn(fs, "fstatSync").mockReturnValue(original as never);
+    vi.spyOn(fs, "readSync").mockImplementation(((_fd: number, buffer: Buffer) => {
+      contents.copy(buffer);
+      return contents.length;
+    }) as never);
+    const close = vi.spyOn(fs, "closeSync").mockImplementation(() => undefined);
+
+    expect(() =>
+      toMSSQLConfig(
+        { ...fixtureProfile(), caPath: "C:\\certs\\ca.pem" },
+        { username: "agent_test", password: "S3cret!" },
+      ),
+    ).toThrowError("tls_failed");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("reads a normal bounded CA through one verified handle", () => {
+    const contents = Buffer.from("TEST CA", "utf8");
+    const stable = fakeBigIntStats({ size: BigInt(contents.length) });
+    vi.spyOn(fs, "lstatSync").mockReturnValue(stable as never);
+    const open = vi.spyOn(fs, "openSync").mockReturnValue(43);
+    vi.spyOn(fs, "fstatSync").mockReturnValue(stable as never);
+    const read = vi.spyOn(fs, "readSync").mockImplementation(((_fd: number, buffer: Buffer) => {
+      contents.copy(buffer);
+      return contents.length;
+    }) as never);
+    const close = vi.spyOn(fs, "closeSync").mockImplementation(() => undefined);
+
+    const config = toMSSQLConfig(
+      { ...fixtureProfile(), caPath: "C:\\certs\\ca.pem" },
+      { username: "agent_test", password: "S3cret!" },
+    );
+
+    expect(config.options).toMatchObject({ cryptoCredentialsDetails: { ca: contents } });
+    expect(open).toHaveBeenCalledOnce();
+    expect(read).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("normalizes an unreadable CA file without exposing its path", () => {
