@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/merchantagent/backend/connector"
+	"github.com/merchantagent/backend/connector/clientexec"
 )
 
 func TestPublishedCatalogChangesWithoutRestart(t *testing.T) {
@@ -105,5 +106,43 @@ func TestPublishedCatalogPropagatesStoreErrors(t *testing.T) {
 	tools, err := catalog.Snapshot(context.Background())
 	if !errors.Is(err, want) || tools != nil {
 		t.Fatalf("Snapshot() = %v, %v; want nil, %v", tools, err, want)
+	}
+}
+
+func TestPublishedCatalogSuppressesReferenceFallbackAfterDisable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	v := validSubmittedVersion()
+	requireNoError(t, store.Submit(ctx, Submission{Version: v, ActorID: "impl-1"}))
+	catalog := connector.NewCompositeCatalog(
+		connector.NewStaticCatalog(clientexec.NewReference()),
+		NewPublishedCatalog(store, v.TenantID),
+	)
+
+	effective := func() map[string]connector.Tool {
+		tools, err := catalog.Snapshot(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tools
+	}
+	if got := effective()["query_order_status"]; got == nil || got.Spec().PackageID != clientexec.PackageID {
+		t.Fatalf("pending tool = %#v, want existing reference proxy", got)
+	}
+	requireNoError(t, store.Transition(ctx, Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: v.Digest, To: StatusPublished, ActorID: "u_admin"}))
+	if got := effective()["query_order_status"]; got == nil || got.Spec().PackageID != v.ConnectorID {
+		t.Fatalf("published tool = %#v, want SQL proxy", got)
+	}
+	requireNoError(t, store.Transition(ctx, Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: v.Digest, To: StatusSuspended, ActorID: "u_admin"}))
+	if got := effective()["query_order_status"]; got != nil {
+		t.Fatalf("suspended tool fell back to reference proxy: %#v", got)
+	}
+	requireNoError(t, store.Transition(ctx, Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: v.Digest, To: StatusPublished, ActorID: "u_admin"}))
+	requireNoError(t, store.Transition(ctx, Transition{TenantID: v.TenantID, ConnectorID: v.ConnectorID, Version: v.Version, Digest: v.Digest, To: StatusRevoked, ActorID: "u_admin"}))
+	if got := effective()["query_order_status"]; got != nil {
+		t.Fatalf("revoked tool fell back to reference proxy: %#v", got)
+	}
+	if effective()["report_production_progress"] == nil {
+		t.Fatal("unrelated reference tool was suppressed")
 	}
 }

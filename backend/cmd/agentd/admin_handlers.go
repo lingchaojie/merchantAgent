@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
+	"strings"
 
 	"github.com/merchantagent/backend/config"
 	"github.com/merchantagent/backend/skill"
@@ -129,6 +131,34 @@ func (s *server) handleTemplatesList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, t)
 }
 
+func (s *server) validateAllowedTools(w http.ResponseWriter, r *http.Request, allowed []string) bool {
+	if s.asm.Catalog == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tool catalog unavailable"})
+		return false
+	}
+	tools, err := s.asm.Catalog.Snapshot(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tool catalog: " + err.Error()})
+		return false
+	}
+	unavailableSet := make(map[string]struct{})
+	for _, name := range allowed {
+		if _, ok := tools[name]; !ok {
+			unavailableSet[name] = struct{}{}
+		}
+	}
+	if len(unavailableSet) == 0 {
+		return true
+	}
+	unavailable := make([]string, 0, len(unavailableSet))
+	for name := range unavailableSet {
+		unavailable = append(unavailable, name)
+	}
+	sort.Strings(unavailable)
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unavailable tools: " + strings.Join(unavailable, ", ")})
+	return false
+}
+
 func (s *server) handleSkillCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		TemplateID string      `json:"templateId"`
@@ -138,12 +168,25 @@ func (s *server) handleSkillCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.TemplateID != "" {
+		templates, err := s.asm.Sk.ListTemplates(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for _, template := range templates {
+			if template.TemplateID == body.TemplateID && !s.validateAllowedTools(w, r, template.AllowedTools) {
+				return
+			}
+		}
 		if _, err := s.asm.Sk.CloneTemplate(r.Context(), s.tenant, body.TemplateID); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 	} else {
 		body.Skill.TenantID = s.tenant
+		if !s.validateAllowedTools(w, r, body.Skill.AllowedTools) {
+			return
+		}
 		if err := s.asm.Sk.Create(r.Context(), body.Skill); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -162,6 +205,9 @@ func (s *server) handleSkillUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	sk.TenantID = s.tenant
 	sk.SkillID = r.PathValue("id")
+	if !s.validateAllowedTools(w, r, sk.AllowedTools) {
+		return
+	}
 	if err := s.asm.Sk.Update(r.Context(), sk); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return

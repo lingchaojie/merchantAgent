@@ -7,6 +7,13 @@ type ToolCatalog interface {
 	Snapshot(context.Context) (map[string]Tool, error)
 }
 
+// ToolCatalogOverlay is an optional catalog capability for later catalogs that
+// must remove named tools supplied by lower-precedence catalogs.
+type ToolCatalogOverlay interface {
+	ToolCatalog
+	SnapshotOverlay(context.Context) (map[string]Tool, map[string]struct{}, error)
+}
+
 type staticCatalog struct {
 	tools map[string]Tool
 }
@@ -46,9 +53,19 @@ func (c compositeCatalog) Snapshot(ctx context.Context) (map[string]Tool, error)
 		if catalog == nil {
 			continue
 		}
-		snapshot, err := catalog.Snapshot(ctx)
+		var snapshot map[string]Tool
+		var suppressed map[string]struct{}
+		var err error
+		if overlay, ok := catalog.(ToolCatalogOverlay); ok {
+			snapshot, suppressed, err = overlay.SnapshotOverlay(ctx)
+		} else {
+			snapshot, err = catalog.Snapshot(ctx)
+		}
 		if err != nil {
 			return nil, err
+		}
+		for name := range suppressed {
+			delete(tools, name)
 		}
 		for name, tool := range snapshot {
 			tools[name] = tool

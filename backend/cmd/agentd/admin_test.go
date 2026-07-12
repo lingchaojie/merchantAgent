@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/merchantagent/backend/connector"
 	"github.com/merchantagent/backend/connector/clientexec"
 	"github.com/merchantagent/backend/provider"
+	"github.com/merchantagent/backend/skill"
 	"github.com/merchantagent/backend/wire"
 )
 
@@ -37,6 +39,119 @@ type adminCatalogConnector struct {
 
 func (c adminCatalogConnector) Name() string            { return c.name }
 func (c adminCatalogConnector) Tools() []connector.Tool { return c.tools }
+
+type adminToolCatalog struct {
+	tools map[string]connector.Tool
+	err   error
+}
+
+func (c adminToolCatalog) Snapshot(context.Context) (map[string]connector.Tool, error) {
+	return c.tools, c.err
+}
+
+func openAdminSkillStore(t *testing.T) *skill.Store {
+	t.Helper()
+	store, err := skill.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
+
+func findAdminSkill(t *testing.T, store *skill.Store, tenant, id string) (skill.Skill, bool) {
+	t.Helper()
+	skills, err := store.List(context.Background(), tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sk := range skills {
+		if sk.SkillID == id {
+			return sk, true
+		}
+	}
+	return skill.Skill{}, false
+}
+
+func callAdminHandler(handler func()) (panicValue any) {
+	defer func() { panicValue = recover() }()
+	handler()
+	return nil
+}
+
+func TestSkillCreateRejectsUnavailableToolsBeforePersistence(t *testing.T) {
+	store := openAdminSkillStore(t)
+	srv := &server{tenant: "t", asm: &wire.Assembled{
+		Sk:      store,
+		Catalog: adminToolCatalog{tools: map[string]connector.Tool{"available_tool": adminCatalogTool{spec: connector.ToolSpec{Name: "available_tool"}}}},
+	}}
+	r := httptest.NewRequest(http.MethodPost, "/admin/skills", strings.NewReader(`{
+		"skill":{"skillId":"new-skill","name":"New","allowedTools":["missing_tool"]}
+	}`))
+	w := httptest.NewRecorder()
+	panicValue := callAdminHandler(func() { srv.handleSkillCreate(w, r) })
+
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "missing_tool") {
+		t.Errorf("create unavailable tool: %d %s", w.Code, w.Body.String())
+	}
+	if panicValue != nil {
+		t.Errorf("create reached projection: %v", panicValue)
+	}
+	if _, exists := findAdminSkill(t, store, "t", "new-skill"); exists {
+		t.Error("invalid skill was persisted")
+	}
+}
+
+func TestSkillUpdateRejectsUnavailableToolsWithoutChangingHistoricalRow(t *testing.T) {
+	store := openAdminSkillStore(t)
+	historical := skill.Skill{TenantID: "t", SkillID: "historical", Name: "Historical", AllowedTools: []string{"retired_tool"}}
+	if err := store.Create(context.Background(), historical); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{tenant: "t", asm: &wire.Assembled{
+		Sk:      store,
+		Catalog: adminToolCatalog{tools: map[string]connector.Tool{"available_tool": adminCatalogTool{spec: connector.ToolSpec{Name: "available_tool"}}}},
+	}}
+	r := httptest.NewRequest(http.MethodPut, "/admin/skills/historical", strings.NewReader(`{
+		"name":"Changed","allowedTools":["missing_tool"]
+	}`))
+	r.SetPathValue("id", "historical")
+	w := httptest.NewRecorder()
+	panicValue := callAdminHandler(func() { srv.handleSkillUpdate(w, r) })
+
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "missing_tool") {
+		t.Errorf("update unavailable tool: %d %s", w.Code, w.Body.String())
+	}
+	if panicValue != nil {
+		t.Errorf("update reached projection: %v", panicValue)
+	}
+	got, exists := findAdminSkill(t, store, "t", "historical")
+	if !exists || got.Name != historical.Name || len(got.AllowedTools) != 1 || got.AllowedTools[0] != "retired_tool" {
+		t.Fatalf("historical skill changed: %+v", got)
+	}
+}
+
+func TestSkillCreateFailsClosedOnCatalogError(t *testing.T) {
+	store := openAdminSkillStore(t)
+	srv := &server{tenant: "t", asm: &wire.Assembled{
+		Sk: store, Catalog: adminToolCatalog{err: errors.New("catalog unavailable")},
+	}}
+	r := httptest.NewRequest(http.MethodPost, "/admin/skills", strings.NewReader(`{
+		"skill":{"skillId":"new-skill","name":"New","allowedTools":["any_tool"]}
+	}`))
+	w := httptest.NewRecorder()
+	panicValue := callAdminHandler(func() { srv.handleSkillCreate(w, r) })
+
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "catalog unavailable") {
+		t.Errorf("create catalog error: %d %s", w.Code, w.Body.String())
+	}
+	if panicValue != nil {
+		t.Errorf("catalog error reached projection: %v", panicValue)
+	}
+	if _, exists := findAdminSkill(t, store, "t", "new-skill"); exists {
+		t.Error("skill was persisted after catalog error")
+	}
+}
 
 func TestAdminToolsDeduplicatesAndExposesExecutionMetadata(t *testing.T) {
 	legacy := adminCatalogConnector{name: "erp", tools: []connector.Tool{

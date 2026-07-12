@@ -23,6 +23,19 @@ type catalogStub struct {
 	err   error
 }
 
+type overlayCatalogStub struct {
+	tools      map[string]Tool
+	suppressed map[string]struct{}
+}
+
+func (c overlayCatalogStub) Snapshot(context.Context) (map[string]Tool, error) {
+	return c.tools, nil
+}
+
+func (c overlayCatalogStub) SnapshotOverlay(context.Context) (map[string]Tool, map[string]struct{}, error) {
+	return c.tools, c.suppressed, nil
+}
+
 func (c catalogStub) Snapshot(context.Context) (map[string]Tool, error) {
 	return c.tools, c.err
 }
@@ -68,5 +81,30 @@ func TestCompositeCatalogFailsClosedOnCatalogError(t *testing.T) {
 	got, err := catalog.Snapshot(context.Background())
 	if !errors.Is(err, want) || got != nil {
 		t.Fatalf("Snapshot() = %v, %v; want nil, %v", got, err, want)
+	}
+}
+
+func TestCompositeCatalogAppliesLaterSuppressionsBeforeOverrides(t *testing.T) {
+	static := catalogTestTool{name: "query_order_status"}
+	replacement := catalogTestTool{name: "published_order_status"}
+	catalog := NewCompositeCatalog(
+		catalogStub{tools: map[string]Tool{
+			"query_order_status": static,
+			"keep_static":        catalogTestTool{name: "keep_static"},
+		}},
+		overlayCatalogStub{
+			tools:      map[string]Tool{"published_order_status": replacement},
+			suppressed: map[string]struct{}{"query_order_status": {}},
+		},
+	)
+	got, err := catalog.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["query_order_status"] != nil {
+		t.Fatalf("suppressed lower-precedence tool remained: %#v", got["query_order_status"])
+	}
+	if got["published_order_status"] != replacement || got["keep_static"] == nil {
+		t.Fatalf("overlay tools = %#v", got)
 	}
 }

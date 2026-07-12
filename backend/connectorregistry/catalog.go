@@ -12,6 +12,10 @@ type publishedStore interface {
 	Published(context.Context, string) ([]Version, error)
 }
 
+type versionLister interface {
+	List(context.Context, string) ([]Version, error)
+}
+
 type publishedCatalog struct {
 	store  publishedStore
 	tenant string
@@ -28,6 +32,42 @@ func (c publishedCatalog) Snapshot(ctx context.Context) (map[string]connector.To
 	if err != nil {
 		return nil, fmt.Errorf("resolve published connectors: %w", err)
 	}
+	return publishedTools(versions)
+}
+
+func (c publishedCatalog) SnapshotOverlay(ctx context.Context) (map[string]connector.Tool, map[string]struct{}, error) {
+	lister, ok := c.store.(versionLister)
+	if !ok {
+		tools, err := c.Snapshot(ctx)
+		return tools, nil, err
+	}
+	versions, err := lister.List(ctx, c.tenant)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve connector lifecycle: %w", err)
+	}
+	published := make([]Version, 0, len(versions))
+	suppressed := make(map[string]struct{})
+	for _, version := range versions {
+		switch version.Status {
+		case StatusPublished:
+			published = append(published, version)
+		case StatusSuspended, StatusRevoked:
+			for _, contract := range version.Contract.Tools {
+				suppressed[contract.Name] = struct{}{}
+			}
+		}
+	}
+	tools, err := publishedTools(published)
+	if err != nil {
+		return nil, nil, err
+	}
+	for name := range tools {
+		delete(suppressed, name)
+	}
+	return tools, suppressed, nil
+}
+
+func publishedTools(versions []Version) (map[string]connector.Tool, error) {
 	tools := make(map[string]connector.Tool)
 	for _, version := range versions {
 		for _, contract := range version.Contract.Tools {
