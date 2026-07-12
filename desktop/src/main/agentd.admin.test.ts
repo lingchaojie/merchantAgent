@@ -38,3 +38,61 @@ describe("client.adminRequest", () => {
     expect(r).toEqual({ ok: false, status: 0, error: "ECONNREFUSED" });
   });
 });
+
+describe("client connector lifecycle", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("fetches a member approval with exact connector identity", async () => {
+    const fetch = vi.fn().mockResolvedValue(textResponse(200, JSON.stringify({
+      connectorId: "sql-orders",
+      version: "1.0.0",
+      digest: `sha256:${"a".repeat(64)}`,
+      status: "published",
+    })));
+    vi.stubGlobal("fetch", fetch);
+
+    const approval = await client.getConnectorApproval("tenant-1", "user-1", "sql-orders", "1.0.0");
+
+    expect(approval).toMatchObject({ status: "published" });
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/connectors/sql-orders/versions/1.0.0/approval"),
+      expect.objectContaining({ headers: { "x-user-id": "user-1" } }),
+    );
+  });
+
+  it("returns null for a missing approval and rejects open response objects", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(textResponse(404, "not found")));
+    await expect(client.getConnectorApproval("tenant-1", "user-1", "sql-orders", "1.0.0")).resolves.toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(textResponse(200, JSON.stringify({
+      connectorId: "sql-orders",
+      version: "1.0.0",
+      digest: `sha256:${"a".repeat(64)}`,
+      status: "published",
+      privateConfig: "leak",
+    }))));
+    await expect(client.getConnectorApproval("tenant-1", "user-1", "sql-orders", "1.0.0"))
+      .rejects.toThrow("approval_unavailable");
+  });
+
+  it("submits only the public version and attestation with implementation auth", async () => {
+    const fetch = vi.fn().mockResolvedValue(textResponse(201, JSON.stringify({
+      digest: `sha256:${"a".repeat(64)}`,
+      status: "pending_admin_approval",
+    })));
+    vi.stubGlobal("fetch", fetch);
+    const body = {
+      version: { connectorId: "sql-orders", version: "1.0.0" },
+      signedAt: "2026-07-13T10:00:00Z",
+      implementationSignature: "signature",
+    };
+
+    await expect(client.submitConnector("credential", body as never)).resolves.toMatchObject({
+      status: "pending_admin_approval",
+    });
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/implementation/connectors"), expect.objectContaining({
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Implementation credential" },
+    }));
+  });
+});

@@ -2,6 +2,33 @@ export interface ClosableStore {
   close(): void;
 }
 
+export type OptionalClosable = unknown;
+
+export interface DesktopConnectorFactories {
+  createPackageReader(): OptionalClosable;
+  createVault(packageReader: OptionalClosable): OptionalClosable;
+  createLedger(vault: OptionalClosable): OptionalClosable;
+  createRuntime(
+    packageReader: OptionalClosable,
+    vault: OptionalClosable,
+    ledger: OptionalClosable,
+  ): OptionalClosable;
+  createWorkbench(
+    packageReader: OptionalClosable,
+    vault: OptionalClosable,
+    ledger: OptionalClosable,
+    runtime: OptionalClosable,
+  ): OptionalClosable;
+}
+
+export interface DesktopConnectorStack {
+  packageReader: OptionalClosable;
+  vault: OptionalClosable;
+  ledger: OptionalClosable;
+  runtime: OptionalClosable;
+  workbench: OptionalClosable;
+}
+
 export interface KillableChild {
   kill(): unknown;
 }
@@ -14,9 +41,10 @@ export interface DesktopStartupDependencies<
   createStore(): TStore;
   verifyPackage(): TPackage;
   createExecutor(pkg: TPackage, store: TStore): TExecutor;
-  register(executor: TExecutor): () => void;
+  register(executor: TExecutor, connectors?: DesktopConnectorStack): () => void;
   spawnAgentd(): KillableChild | null | Promise<KillableChild | null>;
-  createWindow(): void | Promise<void>;
+  createWindow(connectors?: DesktopConnectorStack): void | Promise<void>;
+  connectors?: DesktopConnectorFactories;
 }
 
 export interface DesktopRuntime {
@@ -31,6 +59,8 @@ export async function initializeDesktop<
 >(dependencies: DesktopStartupDependencies<TStore, TPackage, TExecutor>): Promise<DesktopRuntime> {
   let store: TStore | undefined;
   let unregister: (() => void) | undefined;
+  const connectorResources: OptionalClosable[] = [];
+  let connectors: DesktopConnectorStack | undefined;
   let child: KillableChild | null = null;
   let agentdStopped = false;
   let closed = false;
@@ -44,7 +74,19 @@ export async function initializeDesktop<
     if (closed) return;
     closed = true;
     let firstError: unknown;
-    for (const dispose of [stopAgentd, unregister, store ? () => store?.close() : undefined]) {
+    const closeConnectors = connectorResources
+      .slice()
+      .reverse()
+      .map((resource) => {
+        if (
+          typeof resource !== "object"
+          || resource === null
+          || !("close" in resource)
+          || typeof (resource as { close?: unknown }).close !== "function"
+        ) return undefined;
+        return () => { void (resource as { close: () => unknown }).close(); };
+      });
+    for (const dispose of [stopAgentd, unregister, ...closeConnectors, store ? () => store?.close() : undefined]) {
       if (!dispose) continue;
       try {
         dispose();
@@ -60,9 +102,22 @@ export async function initializeDesktop<
     store = dependencies.createStore();
     const pkg = dependencies.verifyPackage();
     const executor = dependencies.createExecutor(pkg, store);
-    unregister = dependencies.register(executor);
+    if (dependencies.connectors !== undefined) {
+      const packageReader = dependencies.connectors.createPackageReader();
+      connectorResources.push(packageReader);
+      const vault = dependencies.connectors.createVault(packageReader);
+      connectorResources.push(vault);
+      const ledger = dependencies.connectors.createLedger(vault);
+      connectorResources.push(ledger);
+      const connectorRuntime = dependencies.connectors.createRuntime(packageReader, vault, ledger);
+      connectorResources.push(connectorRuntime);
+      const workbench = dependencies.connectors.createWorkbench(packageReader, vault, ledger, connectorRuntime);
+      connectorResources.push(workbench);
+      connectors = { packageReader, vault, ledger, runtime: connectorRuntime, workbench };
+    }
+    unregister = dependencies.register(executor, connectors);
     child = await dependencies.spawnAgentd();
-    await dependencies.createWindow();
+    await dependencies.createWindow(connectors);
     return runtime;
   } catch (error) {
     try {

@@ -88,6 +88,9 @@ const mockAgent: AgentAPI = {
   async admin(req) {
     return mockAdmin(req);
   },
+  async openWorkbench() {
+    throw new Error("Workbench unavailable in browser mock");
+  },
 };
 
 export const IS_MOCK = typeof window !== "undefined" && !window.agent;

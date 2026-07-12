@@ -39,7 +39,7 @@ export interface LoadedApprovedConnector extends InstalledConnector {
   payload: ConnectorPrivatePayload;
 }
 
-export type ConnectorPackageErrorCode = "package_integrity" | "package_version";
+export type ConnectorPackageErrorCode = "connector_not_installed" | "package_integrity" | "package_version";
 
 export class ConnectorPackageError extends Error {
   constructor(readonly code: ConnectorPackageErrorCode, detail: string) {
@@ -236,6 +236,9 @@ class ConnectorPackageCore {
       envelope = parseInstalledConnectorEnvelope(JSON.parse(fs.readFileSync(packagePath, "utf8")));
     } catch (error) {
       if (error instanceof ConnectorPackageError) throw error;
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return packageError("connector_not_installed", "connector package is not installed");
+      }
       return packageIntegrity("package envelope cannot be read or validated");
     }
     if (envelope.manifest.connectorId !== ref.connectorId || envelope.manifest.version !== ref.version) {

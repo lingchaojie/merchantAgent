@@ -3,6 +3,7 @@
 // Chat is streamed over SSE; login is a plain POST.
 import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import type {
   ChatEvent,
@@ -11,6 +12,10 @@ import type {
   LocalToolResponse,
   Principal,
 } from "../shared/contract";
+import type { ApprovalResolver } from "./connectors/runtime";
+import type { ConnectorSigningIdentity } from "./connectors/device-identity";
+import type { InstalledConnector } from "./connectors/package-store";
+import { parseInstalledConnectorEnvelope } from "./connectors/schema";
 
 // Use "localhost" (not the 127.0.0.1 IPv4 literal): when agentd runs in WSL2,
 // Windows' localhost relay is often IPv6-only (::1), and Node's fetch
@@ -173,11 +178,176 @@ async function adminRequest(req: {
   return { ok: true, status: res.status, data: parsed };
 }
 
+const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const APPROVAL_KEYS = new Set(["connectorId", "version", "digest", "status"]);
+const SUBMISSION_RESPONSE_KEYS = new Set([
+  "tenantId", "connectorId", "version", "digest", "adapter", "environment", "contract", "checks",
+  "implementationCredentialId", "deviceId", "submittedBy", "approvedBy", "status", "createdAt", "updatedAt",
+]);
+
+function exactRecord(value: unknown, allowed: ReadonlySet<string>): Record<string, unknown> {
+  if (
+    typeof value !== "object"
+    || value === null
+    || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || Object.keys(value).some((key) => !allowed.has(key))
+  ) {
+    throw new Error("connector_response_invalid");
+  }
+  return value as Record<string, unknown>;
+}
+
+async function getConnectorApproval(
+  tenantId: string,
+  userId: string,
+  connectorId: string,
+  version: string,
+): ReturnType<ApprovalResolver["getApproval"]> {
+  if ([tenantId, userId, connectorId, version].some((value) => typeof value !== "string" || value.length === 0)) {
+    throw new Error("approval_unavailable");
+  }
+  let response: Response;
+  try {
+    response = await fetch(
+      `${BASE}/connectors/${encodeURIComponent(connectorId)}/versions/${encodeURIComponent(version)}/approval`,
+      { headers: { "x-user-id": userId } },
+    );
+  } catch {
+    throw new Error("approval_unavailable");
+  }
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error("approval_unavailable");
+  try {
+    const raw = exactRecord(JSON.parse(await response.text()), APPROVAL_KEYS);
+    if (
+      Object.keys(raw).length !== APPROVAL_KEYS.size
+      || raw.connectorId !== connectorId
+      || raw.version !== version
+      || typeof raw.digest !== "string"
+      || !DIGEST.test(raw.digest)
+      || !["pending_admin_approval", "published", "suspended", "revoked"].includes(raw.status as string)
+    ) {
+      throw new Error();
+    }
+    return {
+      digest: raw.digest,
+      status: raw.status as "pending_admin_approval" | "published" | "suspended" | "revoked",
+    };
+  } catch {
+    throw new Error("approval_unavailable");
+  }
+}
+
+export interface ConnectorSubmissionBody {
+  version: Record<string, unknown>;
+  signedAt: string;
+  implementationSignature: string;
+}
+
+async function submitConnector(
+  encodedCredential: string,
+  body: ConnectorSubmissionBody,
+): Promise<{ digest: string; status: "pending_admin_approval" }> {
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}/implementation/connectors`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Implementation ${encodedCredential}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("connector_submit_failed");
+  }
+  if (!response.ok) throw new Error("connector_submit_failed");
+  try {
+    const raw = exactRecord(JSON.parse(await response.text()), SUBMISSION_RESPONSE_KEYS);
+    if (
+      typeof raw.digest !== "string"
+      || !DIGEST.test(raw.digest)
+      || raw.status !== "pending_admin_approval"
+    ) {
+      throw new Error();
+    }
+    return { digest: raw.digest, status: "pending_admin_approval" };
+  } catch {
+    throw new Error("connector_submit_failed");
+  }
+}
+
+export async function submitInstalledConnector(
+  installed: InstalledConnector,
+  identity: ConnectorSigningIdentity,
+): Promise<{ digest: string; status: "pending_admin_approval" }> {
+  let envelope;
+  try {
+    envelope = parseInstalledConnectorEnvelope(JSON.parse(fs.readFileSync(installed.path, "utf8")));
+  } catch {
+    throw new Error("connector_submit_failed");
+  }
+  const manifest = installed.manifest;
+  if (
+    envelope.manifest.connectorId !== manifest.connectorId
+    || envelope.manifest.version !== manifest.version
+    || envelope.manifest.digest !== manifest.digest
+    || envelope.implementationCredential !== identity.implementationCredential
+  ) {
+    throw new Error("connector_submit_failed");
+  }
+  const tools = manifest.publicContract.tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    execution: "desktop",
+    resourceType: tool.resourceType,
+    resourceKind: tool.resourceKind,
+    resourceArg: tool.resourceArg,
+    resourceRelation: tool.resourceRelation,
+    dataDomain: tool.dataDomain,
+    params: Object.entries(tool.parameters.properties).map(([name, property]) => ({
+      name,
+      description: name,
+      type: property.type,
+      required: tool.parameters.required.includes(name),
+      ...(property.minLength === undefined ? {} : { minLength: property.minLength }),
+      ...(property.maxLength === undefined ? {} : { maxLength: property.maxLength }),
+      ...(property.minimum === undefined ? {} : { minimum: property.minimum }),
+      ...(property.maximum === undefined ? {} : { maximum: property.maximum }),
+      ...(property.enum === undefined ? {} : { enum: property.enum }),
+    })),
+    resultFields: tool.resultFields,
+    risk: tool.risk,
+    requiresConfirmation: tool.requiresConfirmation,
+    timeoutMS: tool.timeoutMS,
+    maxResults: tool.maxResults,
+  }));
+  return client.submitConnector(identity.implementationCredential, {
+    version: {
+      tenantId: identity.tenantId,
+      connectorId: manifest.connectorId,
+      version: manifest.version,
+      digest: manifest.digest,
+      adapter: manifest.adapter,
+      environment: manifest.environment,
+      contract: { tools },
+      checks: manifest.checks,
+      implementationCredentialId: manifest.credentialId,
+      deviceId: manifest.deviceId,
+    },
+    signedAt: manifest.signedAt,
+    implementationSignature: envelope.implementationSignature,
+  });
+}
+
 export const client = {
   base: BASE,
   login: (userId: string) => post<Principal>("/login", { userId }),
   chat,
   adminRequest,
+  getConnectorApproval,
+  submitConnector,
 };
 
 // spawnAgentd optionally launches the Go binary and waits until the OS confirms

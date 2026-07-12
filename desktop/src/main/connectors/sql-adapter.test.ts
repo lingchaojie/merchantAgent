@@ -102,6 +102,44 @@ function driverError(name: string, code: string, extra: Record<string, unknown> 
 }
 
 describe("SQLServerAdapter.executeRead", () => {
+  it("returns bounded raw rows only through the explicit Workbench method", async () => {
+    const request = fakeRequest({
+      recordset: [
+        { order_id: "ORD-1001", order_status: "queued", internal_cost: 900 },
+        { order_id: "ORD-1002", order_status: "queued", internal_cost: 800 },
+        { order_id: "ORD-1003", order_status: "queued", internal_cost: 700 },
+      ],
+    });
+    const pool = fakePool(request);
+    const adapter = new SQLServerAdapter(fixtureProfile(), fakeVault(), factoryFor(pool));
+
+    const result = await adapter.executeWorkbenchRead(fixtureReadOperation(), { orderId: "ORD-1001" });
+
+    expect(result.raw).toEqual([
+      { order_id: "ORD-1001", order_status: "queued", internal_cost: 900 },
+      { order_id: "ORD-1002", order_status: "queued", internal_cost: 800 },
+    ]);
+    expect(result.projected).toEqual([
+      { orderId: "ORD-1001", status: "queued" },
+      { orderId: "ORD-1002", status: "queued" },
+    ]);
+    expect(pool.close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a Workbench raw response above the byte ceiling and closes the pool", async () => {
+    const request = fakeRequest({ recordset: [{
+      order_id: "ORD-1001",
+      order_status: "queued",
+      internal_blob: "x".repeat(1024 * 1024),
+    }] });
+    const pool = fakePool(request);
+    const adapter = new SQLServerAdapter(fixtureProfile(), fakeVault(), factoryFor(pool));
+
+    await expect(adapter.executeWorkbenchRead(fixtureReadOperation(), { orderId: "ORD-1001" }))
+      .rejects.toMatchObject({ code: "failed" });
+    expect(pool.close).toHaveBeenCalledOnce();
+  });
+
   it("binds typed values, executes validated SQL unchanged, caps rows, and projects declared aliases only", async () => {
     const request = fakeRequest({
       recordset: [

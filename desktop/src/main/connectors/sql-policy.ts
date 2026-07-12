@@ -444,6 +444,33 @@ export function validateReadOperation(operation: SQLReadOperation): ValidatedSQL
   return validated;
 }
 
+export function readOperationUsesResourceParameter(
+  operation: SQLReadOperation,
+  parameter: string,
+  resourceResultField: string,
+): boolean {
+  const validated = validateSelectTemplate(operation.sql, {
+    declaredObjects: operation.declaredObjects,
+    projection: operation.projection,
+    maxResults: operation.maxResults,
+  });
+  compareBindings(validated.parameterNames, operation.bindings);
+  const resourceProjection = operation.projection.find(
+    (projection) => projection.resultField === resourceResultField,
+  );
+  const resourceColumn = resourceProjection === undefined
+    ? undefined
+    : validated.resultColumns.get(resourceProjection.sourceAlias);
+  return validated.predicate !== null
+    && resourceColumn !== undefined
+    && validated.predicate.andOnly
+    && validated.predicate.leaves.some((leaf) => (
+      leaf.parameter === parameter
+      && leaf.operator === "="
+      && leaf.column.toLowerCase() === resourceColumn.toLowerCase()
+    ));
+}
+
 function validateUpdateTable(value: unknown, declared: string): ReadonlySet<string> {
   if (!Array.isArray(value) || value.length !== 1) unsafe("table");
   const node = record(value[0], "table");

@@ -6,6 +6,17 @@ import { ipcMain, dialog } from "electron";
 import { Sandbox } from "./fsguard";
 import { client } from "./agentd";
 import type { LocalToolExecutor } from "./local-tools/executor";
+import type { WorkbenchService } from "./connectors/workbench-service";
+import {
+  WorkbenchChannels,
+  type WorkbenchCredentialReq,
+  type WorkbenchDraftIdReq,
+  type WorkbenchDraftReq,
+  type WorkbenchOperationReq,
+  type WorkbenchResultReq,
+  type WorkbenchSessionReq,
+  type WorkbenchUnlockReq,
+} from "../shared/connector-contract";
 import {
   Channels,
   type ChatEvent,
@@ -21,8 +32,62 @@ import {
 
 const DEFAULT_LOCAL_TOOL_CONFIRMATION_TIMEOUT_MS = 105_000;
 
+function closedWorkbenchRequest(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("workbench_invalid_request");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  const actual = Reflect.ownKeys(value);
+  if (
+    (prototype !== Object.prototype && prototype !== null)
+    || actual.length !== keys.length
+    || actual.some((key) => typeof key !== "string" || !keys.includes(key))
+  ) {
+    throw new Error("workbench_invalid_request");
+  }
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new Error("workbench_invalid_request");
+    }
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
 export interface IpcRegistrationOptions {
   localToolConfirmationTimeoutMs?: number;
+  openWorkbench?: () => void | Promise<void>;
+}
+
+function confirmationDetail(preview: unknown): string {
+  if (typeof preview !== "object" || preview === null || Array.isArray(preview)) return "Invalid preview";
+  const value = preview as Record<string, unknown>;
+  if (
+    typeof value.orderId === "string"
+    && typeof value.workOrderId === "string"
+    && typeof value.before === "object"
+    && value.before !== null
+    && typeof value.proposed === "object"
+    && value.proposed !== null
+  ) {
+    const before = value.before as Record<string, unknown>;
+    const proposed = value.proposed as Record<string, unknown>;
+    return [
+      `订单：${value.orderId}`,
+      `工单：${value.workOrderId}`,
+      `完成率：${before.completionRate}% → ${proposed.completionRate}%`,
+      `备注：${proposed.note || "（无）"}`,
+    ].join("\n");
+  }
+  const before = Object.getOwnPropertyDescriptor(value, "before")?.value;
+  const proposed = Object.getOwnPropertyDescriptor(value, "proposed")?.value;
+  try {
+    return JSON.stringify({ before, proposed }, null, 2);
+  } catch {
+    return "Invalid preview";
+  }
 }
 
 // handleFileRequest executes a backend file_request on the client via fsguard.
@@ -66,12 +131,7 @@ async function handleLocalToolRequest(
       defaultId: 0,
       cancelId: 0,
       message: "确认更新生产进度",
-      detail: [
-        `订单：${preview.orderId}`,
-        `工单：${preview.workOrderId}`,
-        `完成率：${preview.before.completionRate}% → ${preview.proposed.completionRate}%`,
-        `备注：${preview.proposed.note || "（无）"}`,
-      ].join("\n"),
+      detail: confirmationDetail(preview),
     });
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<boolean>((resolve) => {
@@ -149,10 +209,76 @@ export function register(
       const r = await client.adminRequest(req);
       return r.ok ? { ok: true, data: r.data } : { ok: false, status: r.status, error: r.error || "error" };
     });
+    if (options.openWorkbench !== undefined) {
+      install(Channels.openWorkbench, () => options.openWorkbench?.());
+    }
   } catch (error) {
     cleanup();
     throw error;
   }
 
+  return cleanup;
+}
+
+export function registerWorkbench(
+  service: WorkbenchService,
+  isSenderAllowed: (event: Electron.IpcMainInvokeEvent) => boolean,
+): () => void {
+  const installed: string[] = [];
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    for (const channel of installed.reverse()) ipcMain.removeHandler(channel);
+  };
+  const install: typeof ipcMain.handle = (channel, listener) => {
+    ipcMain.handle(channel, (event, ...args) => {
+      if (!isSenderAllowed(event)) throw new Error("workbench_sender_denied");
+      return listener(event, ...args);
+    });
+    installed.push(channel);
+  };
+  try {
+    install(WorkbenchChannels.enrollment, () => service.getEnrollment());
+    install(WorkbenchChannels.unlock, (_event, req: WorkbenchUnlockReq) => {
+      const value = closedWorkbenchRequest(req, ["encodedCredential"]);
+      return service.unlock(value.encodedCredential as string);
+    });
+    install(WorkbenchChannels.saveCredential, (_event, req: WorkbenchCredentialReq) => {
+      const value = closedWorkbenchRequest(req, ["sessionId", "ref", "credential"]);
+      return service.saveCredential(value.sessionId as string, value.ref as string, value.credential as never);
+    });
+    install(WorkbenchChannels.saveDraft, (_event, req: WorkbenchDraftReq) => {
+      const value = closedWorkbenchRequest(req, ["sessionId", "draft"]);
+      return service.saveDraft(value.sessionId as string, value.draft as never);
+    });
+    install(WorkbenchChannels.testConnection, (_event, req: WorkbenchDraftIdReq) => {
+      const value = closedWorkbenchRequest(req, ["sessionId", "draftId"]);
+      return service.testConnection(value.sessionId as string, value.draftId as string);
+    });
+    install(WorkbenchChannels.testOperation, (_event, req: WorkbenchOperationReq) => {
+      const value = closedWorkbenchRequest(req, ["sessionId", "draftId", "args"]);
+      return service.testOperation(value.sessionId as string, value.draftId as string, value.args as never);
+    });
+    install(WorkbenchChannels.closeResult, (_event, req: WorkbenchResultReq) => {
+      const value = closedWorkbenchRequest(req, ["sessionId", "resultId"]);
+      return service.closeResult(value.sessionId as string, value.resultId as string);
+    });
+    install(WorkbenchChannels.validateAndFreeze, (_event, req: WorkbenchDraftIdReq) => {
+      const value = closedWorkbenchRequest(req, ["sessionId", "draftId"]);
+      return service.validateAndFreeze(value.sessionId as string, value.draftId as string);
+    });
+    install(WorkbenchChannels.submit, (_event, req: WorkbenchDraftIdReq) => {
+      const value = closedWorkbenchRequest(req, ["sessionId", "draftId"]);
+      return service.submit(value.sessionId as string, value.draftId as string);
+    });
+    install(WorkbenchChannels.lock, (_event, req: WorkbenchSessionReq) => {
+      const value = closedWorkbenchRequest(req, ["sessionId"]);
+      return service.lock(value.sessionId as string);
+    });
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
   return cleanup;
 }

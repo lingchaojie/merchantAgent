@@ -13,14 +13,22 @@ export default defineConfig({
   },
   preload: {
     build: {
-      lib: { entry: resolve(__dirname, "src/preload/index.ts") },
+      lib: {
+        entry: {
+          index: resolve(__dirname, "src/preload/index.ts"),
+          workbench: resolve(__dirname, "src/preload/workbench.ts"),
+        },
+      },
     },
   },
   renderer: {
     root: resolve(__dirname, "src/renderer"),
     build: {
       rollupOptions: {
-        input: resolve(__dirname, "src/renderer/index.html"),
+        input: {
+          index: resolve(__dirname, "src/renderer/index.html"),
+          workbench: resolve(__dirname, "src/renderer/workbench.html"),
+        },
       },
     },
     plugins: [react()],

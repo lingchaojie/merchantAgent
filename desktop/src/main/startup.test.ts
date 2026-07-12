@@ -54,4 +54,27 @@ describe("desktop startup lifecycle", () => {
     expect(unregister).toHaveBeenCalledOnce();
     expect(store.close).toHaveBeenCalledOnce();
   });
+
+  it("rolls back partially constructed connector resources in reverse order", async () => {
+    const order: string[] = [];
+    const resource = (name: string) => ({ close: vi.fn(() => order.push(name)) });
+    const reader = resource("reader");
+    const vault = resource("vault");
+    const ledger = resource("ledger");
+    const runtime = { ...resource("runtime"), execute: vi.fn() };
+    const { dependencies } = setup();
+    Object.assign(dependencies, {
+      connectors: {
+        createPackageReader: () => reader,
+        createVault: () => vault,
+        createLedger: () => ledger,
+        createRuntime: () => runtime,
+        createWorkbench: () => { throw new Error("workbench failed"); },
+      },
+    });
+
+    await expect(initializeDesktop(dependencies as never)).rejects.toThrow("workbench failed");
+
+    expect(order).toEqual(["runtime", "ledger", "vault", "reader"]);
+  });
 });

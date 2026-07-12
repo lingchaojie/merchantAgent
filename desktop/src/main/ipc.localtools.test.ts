@@ -132,6 +132,22 @@ describe("local tool confirmation in Electron main", () => {
     expect(executor.writes).toBe(1);
   });
 
+  it("renders a projected connector preview without undefined reference fields", async () => {
+    electron.dialog.showMessageBox.mockResolvedValue({ response: 0 });
+    const executor = {
+      execute: vi.fn(async (_req, confirm) => {
+        await confirm({ before: { orderId: "ORD-1001", status: "queued" }, proposed: { status: "ready" } });
+        return { meta: { status: "cancelled", executionId: "e", idempotencyKey: "i", confirmed: false } };
+      }),
+    };
+
+    await invokeChatWithLocalRequest(executor as never);
+
+    const detail = electron.dialog.showMessageBox.mock.calls[0][0].detail as string;
+    expect(detail).toContain("ORD-1001");
+    expect(detail).not.toContain("undefined");
+  });
+
   it("removes partially installed IPC handlers when registration throws", () => {
     electron.ipcMain.handle
       .mockImplementationOnce(() => undefined)

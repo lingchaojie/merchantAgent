@@ -208,6 +208,15 @@ afterEach(() => {
 });
 
 describe("ConnectorPackageStore", () => {
+  it("classifies an absent approved package as connector_not_installed", () => {
+    const fixture = fixtureStore();
+
+    expect(() => fixture.store.loadApproved(
+      { connectorId: "missing", version: "1.0.0" },
+      `sha256:${"a".repeat(64)}`,
+    )).toThrowError("connector_not_installed");
+  });
+
   it("stores only a public manifest plus DPAPI ciphertext and restores an approved payload", () => {
     const fixture = fixtureStore();
     const installed = fixture.store.install(locallyValidatedDraft(), NOW);

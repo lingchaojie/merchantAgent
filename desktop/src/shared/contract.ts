@@ -95,6 +95,7 @@ export interface AgentAPI {
   readFile(rel: string): Promise<string>;
   writeFile(rel: string, contents: string, confirmed: boolean): Promise<string>;
   admin(req: AdminReq): Promise<AdminResp>;
+  openWorkbench(): Promise<void>;
 }
 
 /** IPC channel names — one place, referenced by main + preload. */
@@ -105,6 +106,7 @@ export const Channels = {
   fsRead: "fs:read",
   fsWrite: "fs:write",
   admin: "agent:admin",
+  openWorkbench: "agent:workbench:open",
 } as const;
 
 // Request payload shapes (what preload sends, what main handlers receive).

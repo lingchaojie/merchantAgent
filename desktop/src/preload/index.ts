@@ -26,6 +26,7 @@ const api: AgentAPI = {
     ipcRenderer.invoke(Channels.fsWrite, { rel, contents, confirmed }),
 
   admin: (req) => ipcRenderer.invoke(Channels.admin, req),
+  openWorkbench: () => ipcRenderer.invoke(Channels.openWorkbench),
 };
 
 contextBridge.exposeInMainWorld("agent", api);

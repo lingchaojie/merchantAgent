@@ -88,6 +88,7 @@ const TLS_CODES = new Set([
 ]);
 const PERMISSION_NUMBERS = new Set([229, 230, 262, 297, 300, 916]);
 const POOL_CLOSE_GRACE_MS = 100;
+const WORKBENCH_RAW_MAX_BYTES = 1024 * 1024;
 
 function publicError(code: ConnectorErrorCode): ConnectorError {
   const error = new ConnectorError(code, code);
@@ -779,6 +780,34 @@ export class SQLServerAdapter {
     }
   }
 
+  async executeWorkbenchRead(
+    operation: SQLReadOperation,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<{ raw: Record<string, unknown>[]; projected: Record<string, unknown>[] }> {
+    try {
+      throwIfAborted(signal);
+      const snapshot = snapshotReadOperation(operation);
+      validateRuntimeOperation(snapshot);
+      validateReadOperation(snapshot);
+      const values = validateArguments(snapshot, args);
+      const profile = snapshotProfile(this.profile);
+      const prepared = prepareMSSQLConfig(profile);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          return await this.workbenchReadOnce(snapshot, values, profile, prepared, signal);
+        } catch (error) {
+          const normalized = normalizeFailure(error);
+          if (attempt === 0 && normalized.transientConnection && signal?.aborted !== true) continue;
+          throw normalized.error;
+        }
+      }
+      throw publicError("failed");
+    } catch (error) {
+      throw normalizeFailure(error).error;
+    }
+  }
+
   async previewUpdate(
     operation: SQLUpdateOperation,
     args: Record<string, unknown>,
@@ -1137,6 +1166,43 @@ export class SQLServerAdapter {
       validateReadOperation(operation);
       const result = await queryWithAbort(request, operation.sql, signal);
       return projectRows(result.recordset, operation.projection, operation.maxResults);
+    } finally {
+      await this.closePool(pool);
+    }
+  }
+
+  private async workbenchReadOnce(
+    operation: SQLReadOperation,
+    values: ReadonlyMap<string, unknown>,
+    profile: SQLServerProfile,
+    prepared: PreparedMSSQLConfig,
+    signal: AbortSignal | undefined,
+  ): Promise<{ raw: Record<string, unknown>[]; projected: Record<string, unknown>[] }> {
+    let pool: mssql.ConnectionPool | undefined;
+    try {
+      throwIfAborted(signal);
+      const credential = await this.requireCredential(profile.credentialRef, signal);
+      throwIfAborted(signal);
+      const config = withMSSQLCredential(prepared, credential);
+      config.requestTimeout = Math.min(profile.queryTimeoutMS, operation.timeoutMS);
+      pool = await openPoolWithAbort(this.pools, config, signal);
+      throwIfAborted(signal);
+      const request = pool.request();
+      bindRequest(request, operation.bindings, values);
+      validateRuntimeOperation(operation);
+      validateReadOperation(operation);
+      const result = await queryWithAbort(request, operation.sql, signal);
+      if (!Array.isArray(result.recordset)) throw publicError("failed");
+      const raw = strictJSONSnapshot(result.recordset.slice(0, operation.maxResults));
+      if (!Array.isArray(raw) || raw.some((row) => typeof row !== "object" || row === null || Array.isArray(row))) {
+        throw publicError("failed");
+      }
+      const encoded = canonicalJSONStringify(raw);
+      if (Buffer.byteLength(encoded, "utf8") > WORKBENCH_RAW_MAX_BYTES) throw publicError("failed");
+      return {
+        raw: raw as Record<string, unknown>[],
+        projected: projectRows(raw, operation.projection, operation.maxResults),
+      };
     } finally {
       await this.closePool(pool);
     }
