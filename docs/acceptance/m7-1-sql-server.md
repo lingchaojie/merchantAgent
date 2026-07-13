@@ -296,7 +296,7 @@ $ConnectorState = Join-Path $UserData 'connectors'
 $IdentityPath = Join-Path $ConnectorState 'device-identity.json'
 $InstalledPackagePath = Join-Path $ConnectorState 'sql-orders\1.0.0.ma-connector'
 $LedgerPath = Join-Path $ConnectorState 'executions.db'
-$StateBackup = Join-Path $Acceptance 'preflight-state-backup'
+$StateBackup = Join-Path $env:LOCALAPPDATA 'merchantAgent-m7-preflight-state-backup'
 $StateManifestPath = Join-Path $StateBackup 'manifest.json'
 $StateFilesBackup = Join-Path $StateBackup 'files'
 $IsolationRelativePaths = @(
@@ -340,8 +340,9 @@ Do not proceed unless the complete manifest exists, every isolated preflight
 file has a hash-identical backup, and all six live paths are absent. Unrelated
 connector files remain in place and must not be modified during acceptance. The
 backup can contain a DPAPI private key, implementation credential, and ledger
-data. Keep it local, never inspect or upload it, and restore/delete it in Step 9
-even if acceptance fails.
+data. It is deliberately outside the acceptance-artifact directory so cleanup
+can retain it after any failure. Keep it local, never inspect or upload it, and
+restore/delete it in Step 9 even if acceptance fails.
 
 Generate an acceptance-only Ed25519 platform key outside the repository. Copy
 its public half only long enough to build the acceptance package; never commit
@@ -505,25 +506,34 @@ its original bytes and ACL; and tears down backend/OpenFGA and SQL material:
 
 ```powershell
 $AcceptanceDeviceIdPath = Join-Path $Acceptance 'acceptance-device-id.txt'
-$AcceptanceDeviceId = if (Test-Path -LiteralPath $AcceptanceDeviceIdPath -PathType Leaf) {
-  (Get-Content -Raw -LiteralPath $AcceptanceDeviceIdPath).Trim()
-} else { $null }
-$CredentialTarget = if ($AcceptanceDeviceId) {
-  "com.merchantagent.connector/mock-corp-001/$AcceptanceDeviceId"
-} else { $null }
 $UserData = Join-Path $env:APPDATA 'merchant-agent-desktop'
 $ConnectorState = Join-Path $UserData 'connectors'
-$StateBackup = Join-Path $Acceptance 'preflight-state-backup'
+$StateBackup = Join-Path $env:LOCALAPPDATA 'merchantAgent-m7-preflight-state-backup'
 $StateManifestPath = Join-Path $StateBackup 'manifest.json'
-$CleanupVerificationFailures = [Collections.Generic.List[string]]::new()
-$HasPreflightManifest = Test-Path -LiteralPath $StateManifestPath -PathType Leaf
-if ($HasPreflightManifest) {
-  $PreflightManifest = @(Get-Content -Raw -LiteralPath $StateManifestPath | ConvertFrom-Json)
-} else {
-  $PreflightManifest = @()
-  $CleanupVerificationFailures.Add("Preflight state manifest is missing: $StateManifestPath")
-}
 $StateFilesBackup = Join-Path $StateBackup 'files'
+$CleanupErrors = [Collections.Generic.List[string]]::new()
+$CleanupContext = [ordered]@{
+  HasPreflightManifest = $false
+  PreflightManifest = @()
+  PreflightPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  CredentialTarget = $null
+  RestorationVerified = $false
+  FinalChecksCompleted = $false
+}
+function Invoke-CleanupStage {
+  param(
+    [Parameter(Mandatory)] [string] $Name,
+    [Parameter(Mandatory)] [scriptblock] $Action
+  )
+  try {
+    & $Action
+    Write-Host "Cleanup stage completed: $Name"
+  } catch {
+    $message = "[$Name] $($_.Exception.Message)"
+    $CleanupErrors.Add($message)
+    Write-Warning "Cleanup stage failed and later stages will still run: $message"
+  }
+}
 $IsolationRelativePaths = @(
   'device-identity.json',
   'sql-orders/1.0.0.ma-connector',
@@ -546,25 +556,236 @@ $AcceptanceArtifacts = @(
   $AcceptanceDeviceIdPath
 )
 
-Stop-AcceptanceProcesses
-if ($CredentialTarget) {
-  $CredentialListing = Invoke-NativeCapture -FilePath 'cmdkey.exe' -ArgumentList @("/list:$CredentialTarget") -FailureMessage 'Credential Manager listing failed.'
-  if ($CredentialListing -match [regex]::Escape($CredentialTarget)) {
-    Invoke-CheckedNativeCommand -FilePath 'cmdkey.exe' -ArgumentList @("/delete:$CredentialTarget") -FailureMessage "Credential Manager deletion failed: $CredentialTarget"
+Invoke-CleanupStage -Name 'Load preflight state manifest' -Action {
+  if (!(Test-Path -LiteralPath $StateManifestPath -PathType Leaf)) {
+    throw "Preflight state manifest is missing: $StateManifestPath"
   }
-  $CredentialListing = Invoke-NativeCapture -FilePath 'cmdkey.exe' -ArgumentList @("/list:$CredentialTarget") -FailureMessage 'Credential Manager verification failed.'
-  if ($CredentialListing -match [regex]::Escape($CredentialTarget)) {
-    throw "Credential Manager target still exists: $CredentialTarget"
+  $CleanupContext.PreflightManifest = @(
+    Get-Content -Raw -LiteralPath $StateManifestPath -ErrorAction Stop |
+      ConvertFrom-Json -ErrorAction Stop
+  )
+  foreach ($state in $CleanupContext.PreflightManifest) {
+    if (!$CleanupContext.PreflightPaths.Add([string]$state.relativePath)) {
+      throw "Duplicate preflight manifest path: $($state.relativePath)"
+    }
+  }
+  $CleanupContext.HasPreflightManifest = $true
+}
+Invoke-CleanupStage -Name 'Read acceptance device identifier' -Action {
+  if (!(Test-Path -LiteralPath $AcceptanceDeviceIdPath -PathType Leaf)) {
+    throw "Acceptance device identifier is missing: $AcceptanceDeviceIdPath"
+  }
+  $acceptanceDeviceId = (Get-Content -Raw -LiteralPath $AcceptanceDeviceIdPath -ErrorAction Stop).Trim()
+  if ([string]::IsNullOrWhiteSpace($acceptanceDeviceId)) {
+    throw 'Acceptance device identifier is empty.'
+  }
+  $CleanupContext.CredentialTarget = "com.merchantagent.connector/mock-corp-001/$acceptanceDeviceId"
+}
+Invoke-CleanupStage -Name 'Stop acceptance processes' -Action {
+  Stop-AcceptanceProcesses
+}
+Invoke-CleanupStage -Name 'Remove Credential Manager target' -Action {
+  if (!$CleanupContext.CredentialTarget) {
+    throw 'Cannot remove the exact Credential Manager target without the acceptance device ID.'
+  }
+  $credentialListing = Invoke-NativeCapture -FilePath 'cmdkey.exe' -ArgumentList @("/list:$($CleanupContext.CredentialTarget)") -FailureMessage 'Credential Manager listing failed.'
+  if ($credentialListing -match [regex]::Escape($CleanupContext.CredentialTarget)) {
+    Invoke-CheckedNativeCommand -FilePath 'cmdkey.exe' -ArgumentList @("/delete:$($CleanupContext.CredentialTarget)") -FailureMessage "Credential Manager deletion failed: $($CleanupContext.CredentialTarget)"
   }
 }
-if (Test-Path -LiteralPath $AcceptancePackage) {
-  Remove-Item -LiteralPath $AcceptancePackage -Recurse -Force -ErrorAction Stop
-}
-if (Test-Path -LiteralPath $AcceptancePackage) {
-  throw "Acceptance package remains: $AcceptancePackage"
+Invoke-CleanupStage -Name 'Remove acceptance package' -Action {
+  if (Test-Path -LiteralPath $AcceptancePackage) {
+    Remove-Item -LiteralPath $AcceptancePackage -Recurse -Force -ErrorAction Stop
+  }
 }
 
-$ResourceCleanup = @'
+$BackendComposeCleanup = @'
+set -euo pipefail
+cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/backend
+docker compose down -v --remove-orphans
+'@
+$SQLComposeCleanup = @'
+set -euo pipefail
+cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver
+docker compose down -v --remove-orphans
+'@
+$GeneratedResourceCleanup = @'
+set -euo pipefail
+rm -rf -- "$HOME/.local/share/merchantagent-m7"
+rm -rf -- /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver/tls
+'@
+Invoke-CleanupStage -Name 'Tear down backend Compose' -Action {
+  Invoke-WSLBashScript -Script $BackendComposeCleanup -FailureMessage 'Backend/OpenFGA cleanup failed.'
+}
+Invoke-CleanupStage -Name 'Tear down SQL Compose' -Action {
+  Invoke-WSLBashScript -Script $SQLComposeCleanup -FailureMessage 'SQL resource cleanup failed.'
+}
+Invoke-CleanupStage -Name 'Remove generated WSL resources' -Action {
+  Invoke-WSLBashScript -Script $GeneratedResourceCleanup -FailureMessage 'Generated backend data or SQL TLS cleanup failed.'
+}
+
+Invoke-CleanupStage -Name 'Inspect unexpected connector state' -Action {
+  if (!$CleanupContext.HasPreflightManifest) {
+    throw 'Cannot inspect connector state without the preflight manifest.'
+  }
+  $currentManifest = @(Get-ConnectorStateManifest -Root $ConnectorState)
+  $extraState = @($currentManifest | Where-Object {
+    !$CleanupContext.PreflightPaths.Contains([string]$_.relativePath)
+  })
+  $unexpectedState = @()
+  foreach ($state in $extraState) {
+    $isIsolationFile = $state.kind -eq 'file' -and $IsolationRelativePaths -contains $state.relativePath
+    $isAcceptanceTemp = $state.kind -eq 'file' -and @(
+      $AcceptanceTempPatterns | Where-Object { $state.relativePath -match $_ }
+    ).Count -gt 0
+    $isAcceptanceDirectory = $state.kind -eq 'directory' -and $state.relativePath -in @('.', 'sql-orders')
+    if (!$isIsolationFile -and !$isAcceptanceTemp -and !$isAcceptanceDirectory) {
+      $unexpectedState += $state.relativePath
+    }
+  }
+  if ($unexpectedState.Count -gt 0) {
+    throw "Unexpected connector state remains after acceptance and will be preserved: $($unexpectedState -join ', ')"
+  }
+}
+Invoke-CleanupStage -Name 'Remove acceptance connector temporary files' -Action {
+  if (!$CleanupContext.HasPreflightManifest) {
+    throw 'Cannot distinguish acceptance temporary files without the preflight manifest.'
+  }
+  if (!(Test-Path -LiteralPath $ConnectorState -PathType Container)) { return }
+  $temporaryFailures = [Collections.Generic.List[string]]::new()
+  foreach ($state in @(Get-ConnectorStateManifest -Root $ConnectorState)) {
+    $isAcceptanceTemp = $state.kind -eq 'file' -and @(
+      $AcceptanceTempPatterns | Where-Object { $state.relativePath -match $_ }
+    ).Count -gt 0 -and !$CleanupContext.PreflightPaths.Contains([string]$state.relativePath)
+    if ($isAcceptanceTemp) {
+      try {
+        $temporaryPath = Join-Path $ConnectorState $state.relativePath
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $temporaryPath) {
+          throw "Acceptance atomic-write temporary file remains: $($state.relativePath)"
+        }
+      } catch {
+        $temporaryFailures.Add("$($state.relativePath): $($_.Exception.Message)")
+      }
+    }
+  }
+  if ($temporaryFailures.Count -gt 0) {
+    throw "Acceptance temporary-file cleanup failed: $($temporaryFailures -join '; ')"
+  }
+}
+Invoke-CleanupStage -Name 'Restore preflight connector files and ACLs' -Action {
+  if (!$CleanupContext.HasPreflightManifest) {
+    throw 'Cannot restore connector state without the preflight manifest; leave live state and the sensitive backup untouched.'
+  }
+  $restoreFailures = [Collections.Generic.List[string]]::new()
+  foreach ($relativePath in $IsolationRelativePaths) {
+    try {
+      $preflightState = @($CleanupContext.PreflightManifest | Where-Object {
+        $_.relativePath -eq $relativePath
+      })
+      if ($preflightState.Count -gt 1) { throw "Duplicate preflight manifest path: $relativePath" }
+      $livePath = Join-Path $ConnectorState $relativePath
+      if ($preflightState.Count -eq 1) {
+        if ($preflightState[0].kind -ne 'file') { throw "Restore target is not a file: $relativePath" }
+        $backupPath = Join-Path $StateFilesBackup $relativePath
+        if (!(Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+          throw "Backup is missing for connector state: $relativePath"
+        }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $backupPath).Hash -ne $preflightState[0].sha256) {
+          throw "Backup hash differs before deleting live state: $relativePath"
+        }
+      }
+      if (Test-Path -LiteralPath $livePath -PathType Leaf) {
+        Remove-Item -LiteralPath $livePath -Force -ErrorAction Stop
+      } elseif (Test-Path -LiteralPath $livePath) {
+        throw "Acceptance state path is not a file and will be preserved: $relativePath"
+      }
+      if ($preflightState.Count -eq 1) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $livePath) | Out-Null
+        Copy-Item -LiteralPath $backupPath -Destination $livePath -ErrorAction Stop
+        $acl = Get-Acl -LiteralPath $livePath -ErrorAction Stop
+        $acl.SetSecurityDescriptorSddlForm($preflightState[0].sddl)
+        Set-Acl -LiteralPath $livePath -AclObject $acl -ErrorAction Stop
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $livePath).Hash -ne $preflightState[0].sha256) {
+          throw "Restored bytes differ for connector state: $relativePath"
+        }
+        if ((Get-Acl -LiteralPath $livePath -ErrorAction Stop).Sddl -ne $preflightState[0].sddl) {
+          throw "Restored ACL differs for connector state: $relativePath"
+        }
+      } elseif (Test-Path -LiteralPath $livePath) {
+        throw "Acceptance userData state remains: $livePath"
+      }
+    } catch {
+      $restoreFailures.Add("$($relativePath): $($_.Exception.Message)")
+    }
+  }
+  if ($restoreFailures.Count -gt 0) {
+    throw "One or more connector paths could not be restored: $($restoreFailures -join '; ')"
+  }
+}
+Invoke-CleanupStage -Name 'Remove empty acceptance connector directories' -Action {
+  if (!$CleanupContext.HasPreflightManifest) {
+    throw 'Cannot decide which connector directories predated acceptance without the preflight manifest.'
+  }
+  $installedPackageDirectory = Join-Path $ConnectorState 'sql-orders'
+  if (!$CleanupContext.PreflightPaths.Contains('sql-orders') -and
+      (Test-Path -LiteralPath $installedPackageDirectory) -and
+      (Get-ChildItem -Force -LiteralPath $installedPackageDirectory | Measure-Object).Count -eq 0) {
+    Remove-Item -LiteralPath $installedPackageDirectory -Force -ErrorAction Stop
+  }
+  if (!$CleanupContext.PreflightPaths.Contains('.') -and
+      (Test-Path -LiteralPath $ConnectorState) -and
+      (Get-ChildItem -Force -LiteralPath $ConnectorState | Measure-Object).Count -eq 0) {
+    Remove-Item -LiteralPath $ConnectorState -Force -ErrorAction Stop
+  }
+}
+Invoke-CleanupStage -Name 'Verify restored connector manifest, file hashes, and ACLs' -Action {
+  if (!$CleanupContext.HasPreflightManifest) {
+    throw 'Cannot verify restored connector state without the preflight manifest.'
+  }
+  $finalManifest = @(Get-ConnectorStateManifest -Root $ConnectorState)
+  Assert-ConnectorStateMatches -Expected $CleanupContext.PreflightManifest -Actual $finalManifest
+  $CleanupContext.RestorationVerified = $true
+  Write-Host 'Complete preflight connector-state snapshot restored'
+}
+Invoke-CleanupStage -Name 'Remove acceptance artifacts' -Action {
+  $artifactFailures = [Collections.Generic.List[string]]::new()
+  foreach ($artifact in $AcceptanceArtifacts) {
+    try {
+      if (Test-Path -LiteralPath $artifact) {
+        Remove-Item -LiteralPath $artifact -Force -ErrorAction Stop
+      }
+    } catch {
+      $artifactFailures.Add("$($artifact): $($_.Exception.Message)")
+    }
+  }
+  if ($artifactFailures.Count -gt 0) {
+    throw "Acceptance artifact cleanup failed: $($artifactFailures -join '; ')"
+  }
+}
+Invoke-CleanupStage -Name 'Remove empty acceptance temp directory' -Action {
+  if ((Test-Path -LiteralPath $Acceptance) -and
+      (Get-ChildItem -Force -LiteralPath $Acceptance | Measure-Object).Count -gt 0) {
+    throw "Unexpected acceptance temp artifact will be preserved under: $Acceptance"
+  }
+  if (Test-Path -LiteralPath $Acceptance) {
+    Remove-Item -LiteralPath $Acceptance -Force -ErrorAction Stop
+  }
+}
+Invoke-CleanupStage -Name 'Verify acceptance artifacts' -Action {
+  $remainingArtifacts = @($AcceptanceArtifacts | Where-Object { Test-Path -LiteralPath $_ })
+  if ($remainingArtifacts.Count -gt 0) {
+    throw "Acceptance artifact remains: $($remainingArtifacts -join ', ')"
+  }
+  if (Test-Path -LiteralPath $Acceptance) {
+    throw "Acceptance temp directory remains: $Acceptance"
+  }
+}
+Invoke-CleanupStage -Name 'Verify acceptance processes and port' -Action {
+  Stop-AcceptanceProcesses
+}
+
+$BackendComposeVerification = @'
 set -euo pipefail
 capture_required() {
   local variable="$1"
@@ -574,154 +795,115 @@ capture_required() {
     printf -v "$variable" '%s' "$output"
   else
     status=$?
-    echo "required Compose resource check failed: $* (exit $status)" >&2
+    echo "required backend Compose check failed: $* (exit $status)" >&2
     return "$status"
   fi
 }
-cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/backend && docker compose down -v --remove-orphans
-cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver && docker compose down -v --remove-orphans
-rm -rf -- "$HOME/.local/share/merchantagent-m7"
-rm -rf -- /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver/tls
-capture_required backend_containers docker ps -aq --filter label=com.docker.compose.project=backend
-capture_required backend_networks docker network ls -q --filter label=com.docker.compose.project=backend
-capture_required sql_containers docker ps -aq --filter label=com.docker.compose.project=sqlserver
-capture_required sql_networks docker network ls -q --filter label=com.docker.compose.project=sqlserver
-if [ -n "$backend_containers$backend_networks" ]; then
+capture_required containers docker ps -aq --filter label=com.docker.compose.project=backend
+capture_required networks docker network ls -q --filter label=com.docker.compose.project=backend
+if [ -n "$containers$networks" ]; then
   echo 'Acceptance Compose resource remains: backend' >&2
   exit 1
 fi
-if [ -n "$sql_containers$sql_networks" ]; then
+'@
+$SQLComposeVerification = @'
+set -euo pipefail
+capture_required() {
+  local variable="$1"
+  shift
+  local output status
+  if output="$("$@")"; then
+    printf -v "$variable" '%s' "$output"
+  else
+    status=$?
+    echo "required SQL Compose check failed: $* (exit $status)" >&2
+    return "$status"
+  fi
+}
+capture_required containers docker ps -aq --filter label=com.docker.compose.project=sqlserver
+capture_required networks docker network ls -q --filter label=com.docker.compose.project=sqlserver
+if [ -n "$containers$networks" ]; then
   echo 'Acceptance Compose resource remains: sqlserver' >&2
   exit 1
 fi
+'@
+$GeneratedResourceVerification = @'
+set -euo pipefail
 test ! -e "$HOME/.local/share/merchantagent-m7"
 test ! -e /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver/tls
 '@
-Invoke-WSLBashScript -Script $ResourceCleanup -FailureMessage 'Backend/OpenFGA or SQL resource cleanup failed.'
+Invoke-CleanupStage -Name 'Verify backend Compose resources' -Action {
+  Invoke-WSLBashScript -Script $BackendComposeVerification -FailureMessage 'Backend/OpenFGA resource verification failed.'
+}
+Invoke-CleanupStage -Name 'Verify SQL Compose resources' -Action {
+  Invoke-WSLBashScript -Script $SQLComposeVerification -FailureMessage 'SQL Compose resource verification failed.'
+}
+Invoke-CleanupStage -Name 'Verify generated WSL resources' -Action {
+  Invoke-WSLBashScript -Script $GeneratedResourceVerification -FailureMessage 'Generated backend data or SQL TLS verification failed.'
+}
+Invoke-CleanupStage -Name 'Verify Credential Manager target' -Action {
+  if (!$CleanupContext.CredentialTarget) {
+    throw 'Cannot verify the exact Credential Manager target without the acceptance device ID.'
+  }
+  $credentialListing = Invoke-NativeCapture -FilePath 'cmdkey.exe' -ArgumentList @("/list:$($CleanupContext.CredentialTarget)") -FailureMessage 'Credential Manager verification failed.'
+  if ($credentialListing -match [regex]::Escape($CleanupContext.CredentialTarget)) {
+    throw "Credential Manager target still exists: $($CleanupContext.CredentialTarget)"
+  }
+}
+Invoke-CleanupStage -Name 'Verify acceptance package' -Action {
+  if (Test-Path -LiteralPath $AcceptancePackage) {
+    throw "Acceptance package remains: $AcceptancePackage"
+  }
+}
+Invoke-CleanupStage -Name 'Verify scoped Git state' -Action {
+  $scopedGitStatus = Invoke-NativeCapture -FilePath 'git.exe' -ArgumentList @('-C', $Repo, 'status', '--short', '--', 'desktop/resources/implementation/platform-public.pem', 'test/sqlserver') -FailureMessage 'Scoped acceptance Git verification failed.'
+  if ($scopedGitStatus) {
+    throw "Acceptance changed tracked platform-key or SQL-fixture files: $scopedGitStatus"
+  }
+}
 
-if ($HasPreflightManifest) {
-  $CurrentManifest = @(Get-ConnectorStateManifest -Root $ConnectorState)
-  $PreflightPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-  foreach ($state in $PreflightManifest) { [void]$PreflightPaths.Add([string]$state.relativePath) }
-  $ExtraState = @($CurrentManifest | Where-Object { !$PreflightPaths.Contains([string]$_.relativePath) })
-  $UnexpectedState = @()
-  foreach ($state in $ExtraState) {
-    $isIsolationFile = $state.kind -eq 'file' -and $IsolationRelativePaths -contains $state.relativePath
-    $isAcceptanceTemp = $state.kind -eq 'file' -and @($AcceptanceTempPatterns | Where-Object { $state.relativePath -match $_ }).Count -gt 0
-    $isAcceptanceDirectory = $state.kind -eq 'directory' -and $state.relativePath -in @('.', 'sql-orders')
-    if (!$isIsolationFile -and !$isAcceptanceTemp -and !$isAcceptanceDirectory) {
-      $UnexpectedState += $state.relativePath
-    }
-  }
-  if ($UnexpectedState.Count -gt 0) {
-    throw "Unexpected connector state remains after restore: $($UnexpectedState -join ', ')"
-  }
-
-  foreach ($state in $ExtraState) {
-    $isAcceptanceTemp = $state.kind -eq 'file' -and @($AcceptanceTempPatterns | Where-Object { $state.relativePath -match $_ }).Count -gt 0
-    if ($isAcceptanceTemp) {
-      $temporaryPath = Join-Path $ConnectorState $state.relativePath
-      Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction Stop
-      if (Test-Path -LiteralPath $temporaryPath) {
-        throw "Acceptance atomic-write temporary file remains: $($state.relativePath)"
+$CleanupContext.FinalChecksCompleted = $true
+if (!$CleanupContext.RestorationVerified -and $CleanupErrors.Count -eq 0) {
+  $CleanupErrors.Add('[cleanup orchestration] Restoration verification did not complete.')
+}
+if ($CleanupErrors.Count -eq 0 -and $CleanupContext.RestorationVerified) {
+  if (!$CleanupContext.FinalChecksCompleted) {
+    $CleanupErrors.Add('[cleanup orchestration] Final verification stages did not complete.')
+  } else {
+    Invoke-CleanupStage -Name 'Delete verified sensitive backup' -Action {
+      Remove-Item -LiteralPath $StateBackup -Recurse -Force -ErrorAction Stop
+      if (Test-Path -LiteralPath $StateBackup) {
+        throw "Sensitive state backup remains: $StateBackup"
       }
     }
   }
-
-  foreach ($relativePath in $IsolationRelativePaths) {
-    $preflightState = @($PreflightManifest | Where-Object { $_.relativePath -eq $relativePath })
-    if ($preflightState.Count -gt 1) { throw "Duplicate preflight manifest path: $relativePath" }
-    $livePath = Join-Path $ConnectorState $relativePath
-    if ($preflightState.Count -eq 1) {
-      if ($preflightState[0].kind -ne 'file') { throw "Restore target is not a file: $relativePath" }
-      $backupPath = Join-Path $StateFilesBackup $relativePath
-      if (!(Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-        throw "Backup is missing for connector state: $relativePath"
-      }
-      if ((Get-FileHash -Algorithm SHA256 -LiteralPath $backupPath).Hash -ne $preflightState[0].sha256) {
-        throw "Backup hash differs before deleting live state: $relativePath"
-      }
-    }
-    if (Test-Path -LiteralPath $livePath -PathType Leaf) {
-      Remove-Item -LiteralPath $livePath -Force -ErrorAction Stop
-    } elseif (Test-Path -LiteralPath $livePath) {
-      throw "Acceptance state path is not a file: $relativePath"
-    }
-    if ($preflightState.Count -eq 1) {
-      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $livePath) | Out-Null
-      Copy-Item -LiteralPath $backupPath -Destination $livePath -ErrorAction Stop
-      $acl = Get-Acl -LiteralPath $livePath
-      $acl.SetSecurityDescriptorSddlForm($preflightState[0].sddl)
-      Set-Acl -LiteralPath $livePath -AclObject $acl -ErrorAction Stop
-      if ((Get-FileHash -Algorithm SHA256 -LiteralPath $livePath).Hash -ne $preflightState[0].sha256) {
-        throw "Restored bytes differ for connector state: $relativePath"
-      }
-      if ((Get-Acl -LiteralPath $livePath).Sddl -ne $preflightState[0].sddl) {
-        throw "Restored ACL differs for connector state: $relativePath"
-      }
-    } elseif (Test-Path -LiteralPath $livePath) {
-      throw "Acceptance userData state remains: $livePath"
-    }
-  }
-
-  $InstalledPackageDirectory = Join-Path $ConnectorState 'sql-orders'
-  if (!$PreflightPaths.Contains('sql-orders') -and
-      (Test-Path -LiteralPath $InstalledPackageDirectory) -and
-      (Get-ChildItem -Force -LiteralPath $InstalledPackageDirectory | Measure-Object).Count -eq 0) {
-    Remove-Item -LiteralPath $InstalledPackageDirectory -Force -ErrorAction Stop
-  }
-  if (!$PreflightPaths.Contains('.') -and
-      (Test-Path -LiteralPath $ConnectorState) -and
-      (Get-ChildItem -Force -LiteralPath $ConnectorState | Measure-Object).Count -eq 0) {
-    Remove-Item -LiteralPath $ConnectorState -Force -ErrorAction Stop
-  }
-  $FinalManifest = @(Get-ConnectorStateManifest -Root $ConnectorState)
-  Assert-ConnectorStateMatches -Expected $PreflightManifest -Actual $FinalManifest
-  Write-Host 'Complete preflight connector-state snapshot restored'
-  Remove-Item -LiteralPath $StateBackup -Recurse -Force -ErrorAction Stop
-  if (Test-Path -LiteralPath $StateBackup) {
-    throw "Sensitive state backup remains: $StateBackup"
-  }
 }
-foreach ($artifact in $AcceptanceArtifacts) {
-  if (Test-Path -LiteralPath $artifact) {
-    Remove-Item -LiteralPath $artifact -Force -ErrorAction Stop
-  }
-  if (Test-Path -LiteralPath $artifact) {
-    throw "Acceptance artifact remains: $artifact"
-  }
-}
-if ((Test-Path -LiteralPath $Acceptance) -and
-    (Get-ChildItem -Force -LiteralPath $Acceptance | Measure-Object).Count -gt 0) {
-  throw "Acceptance temp artifact remains under: $Acceptance"
-}
-if (Test-Path -LiteralPath $Acceptance) {
-  Remove-Item -LiteralPath $Acceptance -Force -ErrorAction Stop
-}
-if (Test-Path -LiteralPath $Acceptance) {
-  throw "Acceptance temp directory remains: $Acceptance"
-}
-if (!$CredentialTarget) {
-  $CleanupVerificationFailures.Add('Cannot verify the exact Credential Manager target without the acceptance device ID.')
-}
-$ScopedGitStatus = Invoke-NativeCapture -FilePath 'git.exe' -ArgumentList @('-C', $Repo, 'status', '--short', '--', 'desktop/resources/implementation/platform-public.pem', 'test/sqlserver') -FailureMessage 'Scoped acceptance Git verification failed.'
-if ($ScopedGitStatus) {
-  throw "Acceptance changed tracked platform-key or SQL-fixture files: $ScopedGitStatus"
-}
-Stop-AcceptanceProcesses
-if ($CleanupVerificationFailures.Count -gt 0) {
-  throw "Cleanup ran but could not complete every verification: $($CleanupVerificationFailures -join '; ')"
+if ($CleanupErrors.Count -gt 0) {
+  $ManualRecovery = @"
+Manual recovery required. The sensitive preflight backup was retained at:
+  $StateBackup
+Keep the packaged app and agentd stopped. Read manifest.json, restore only the
+six isolation paths from the files directory, apply each recorded SDDL with
+Set-Acl, and verify every SHA-256 and ACL before removing the backup. Preserve
+unexpected unrelated connector state. Re-run every final process/port, Compose,
+Credential Manager, artifact, manifest, hash, and ACL check before claiming PASS.
+"@
+  Write-Warning $ManualRecovery
+  throw "Cleanup failed in $($CleanupErrors.Count) stage(s):`n - $($CleanupErrors -join "`n - ")`n$ManualRecovery"
 }
 Write-Host 'Final cleanup verification passed'
 ```
 
 Do not rebuild with the acceptance key. The cleanup block is successful only if
-it prints `Final cleanup verification passed`. Before that line it rechecks the
+it prints the sole success marker shown above. Before that line it rechecks the
 exact Credential Manager target, packaged processes and backend port, both
 Compose projects' containers and networks, the acceptance package and key files,
 fixture TLS, backend data, temporary directory, and each userData file. An
 original userData file is present only after its recorded SHA-256 and ACL SDDL
-match; a path that did not exist before acceptance remains absent.
+match; a path that did not exist before acceptance remains absent. Every cleanup
+and verification stage records its own failure and allows later stages to run.
+Any accumulated error retains the sensitive backup and prints exact manual
+recovery instructions; unexpected unrelated state is reported and preserved.
 
 ## Evidence Table
 
