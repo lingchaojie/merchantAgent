@@ -91,7 +91,7 @@ func toolSpec(version Version, contract ToolContract) connector.ToolSpec {
 	}
 	return connector.ToolSpec{
 		PackageID: version.ConnectorID, Version: version.Version, ManifestDigest: version.Digest,
-		Adapter: version.Adapter, Environment: version.Environment,
+		Adapter: version.Adapter, Environment: version.Environment, DeviceID: version.DeviceID,
 		Name: contract.Name, Description: contract.Description, Params: params,
 		ResourceType: contract.ResourceType, ResourceKind: contract.ResourceKind, ResourceArg: contract.ResourceArg,
 		ResourceRelation: contract.ResourceRelation, DataDomain: contract.DataDomain,
@@ -118,7 +118,7 @@ func (t publishedTool) Invoke(ctx context.Context, args map[string]any) (map[str
 	response, err := bridge.InvokeLocalTool(ctx, connector.LocalToolRequest{
 		PackageID: t.spec.PackageID, PackageVersion: t.spec.Version, ManifestDigest: t.spec.ManifestDigest,
 		Tool: t.spec.Name, TenantID: invocation.TenantID, UserID: invocation.UserID, SkillID: invocation.SkillID,
-		CallID: invocation.CallID, DeviceID: invocation.DeviceID,
+		CallID: invocation.CallID, DeviceID: t.spec.DeviceID,
 		IdempotencyKey: connector.ExpectedIdempotencyKey(invocation, t.spec.Name), RoleIDs: append([]string(nil), invocation.RoleIDs...),
 		Args: args, Risk: t.spec.Risk, RequiresConfirmation: t.spec.RequiresConfirmation,
 	})

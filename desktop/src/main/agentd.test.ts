@@ -154,7 +154,7 @@ describe("client.chat streaming", () => {
     }]);
   });
 
-  it("routes a published connector bridge request with the enrolled device ID", async () => {
+  it("preserves backend connector identity and binds reference tools to the hostname", async () => {
     const stream =
       'event: local_tool_request\ndata: {"kind":"local_tool_request","reqId":"connector-1","packageId":"sql-orders","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"backend-value","roleIds":["sales"],"skillId":"order-360","callId":"call-connector","idempotencyKey":"idem-connector","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
       'event: local_tool_request\ndata: {"kind":"local_tool_request","reqId":"reference-1","packageId":"reference-manufacturing","packageVersion":"1.0.0","manifestDigest":"sha256:digest","tool":"query_order_status","tenantId":"mock-corp-001","userId":"u_sales1","deviceId":"backend-value","roleIds":["sales"],"skillId":"order-360","callId":"call-reference","idempotencyKey":"idem-reference","risk":"read","requiresConfirmation":false,"args":{"orderId":"SO-1001"}}\n\n' +
@@ -177,13 +177,13 @@ describe("client.chat streaming", () => {
       () => undefined,
       undefined,
       connectorRuntime,
-      { connectorDeviceId: "enrolled-device-uuid" },
+      { connectorDeviceId: "desktop-option-must-not-rewrite" },
     );
 
     expect(chatBody).toMatchObject({ deviceId: os.hostname() });
     expect(connectorRuntime).toHaveBeenCalledWith(expect.objectContaining({
       packageId: "sql-orders",
-      deviceId: "enrolled-device-uuid",
+      deviceId: "backend-value",
     }));
     expect(connectorRuntime).toHaveBeenCalledWith(expect.objectContaining({
       packageId: "reference-manufacturing",

@@ -193,7 +193,7 @@ function fixture(operation: SQLReadOperation | SQLUpdateOperation = readOperatio
   const loadApproved = vi.fn(() => connector);
   const credentialGet = vi.fn(async () => ({ username: "svc", password: "secret" }));
   const source = {
-    executeRead: vi.fn(async () => [{ orderId: "ORD-1001" }]),
+    executeRead: vi.fn(async (): Promise<Record<string, unknown>[]> => [{ orderId: "ORD-1001" }]),
     resumeUpdate: vi.fn(async () => null),
     previewUpdate: vi.fn(async () => ({ before: { orderId: "ORD-1001", version: 1, note: "" }, proposed: { note: "done", version: 2 } })),
     executeConfirmedUpdate: vi.fn(async () => ({ orderId: "ORD-1001", version: 2, note: "done" })),
@@ -341,15 +341,37 @@ describe("ConnectorRuntime Gate C", () => {
     },
   );
 
-  it("dispatches an approved read and returns only projected rows", async () => {
+  it("dispatches an approved read as one flat contract-filtered record", async () => {
     const f = fixture();
+	  f.source.executeRead.mockResolvedValueOnce([{ orderId: "ORD-1001", internalCost: "raw-cost-canary" }]);
 
     const result = await f.runtime.execute(request(), async () => true);
 
     expect(result).toMatchObject({
-      data: { rows: [{ orderId: "ORD-1001" }] },
+	  data: { orderId: "ORD-1001" },
       meta: { status: "succeeded", executionId: "execution-1", confirmed: false },
     });
+	  expect(JSON.stringify(result)).not.toContain("raw-cost-canary");
+  });
+
+  it("returns record_not_found when an approved read has no rows", async () => {
+	  const f = fixture();
+	  f.source.executeRead.mockResolvedValueOnce([]);
+
+	  const result = await f.runtime.execute(request(), async () => true);
+
+	  expect(result).toMatchObject({ error: "record_not_found", meta: { status: "failed" } });
+	  expect(result.data).toBeUndefined();
+  });
+
+  it("fails closed when an approved read returns more than one row", async () => {
+	  const f = fixture();
+	  f.source.executeRead.mockResolvedValueOnce([{ orderId: "ORD-1001" }, { orderId: "ORD-1002" }]);
+
+	  const result = await f.runtime.execute(request(), async () => true);
+
+	  expect(result).toMatchObject({ error: "source_rejected", meta: { status: "failed" } });
+	  expect(result.data).toBeUndefined();
   });
 
   it("executes a low write only after confirmation", async () => {

@@ -57,6 +57,7 @@ type ToolSpec struct {
 	ManifestDigest       string
 	Adapter              string
 	Environment          string
+	DeviceID             string
 	Name                 string
 	Description          string
 	Params               []ParamSpec

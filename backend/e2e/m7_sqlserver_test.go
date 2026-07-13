@@ -21,6 +21,8 @@ import (
 	"github.com/merchantagent/backend/wire"
 )
 
+const m71AuditSecretCanary = "m71-private-audit-canary"
+
 func TestM71SQLServerVertical(t *testing.T) {
 	h := newM71Harness(t)
 	h.SubmitAndPublishSQLConnector("sql-orders", "1.0.0")
@@ -140,14 +142,27 @@ func (h *m71Harness) ExpectAuditChainValidAndSecretFree() {
 		h.t.Fatal(err)
 	}
 	text := string(encoded)
-	for _, secret := range []string{"SELECT", "UPDATE", "dbo.", "sql.internal", "S3cret", "credentialRef", "internal_cost"} {
+	if len(h.bridge.devices) == 0 {
+		h.t.Fatal("desktop bridge received no connector requests")
+	}
+	for _, deviceID := range h.bridge.devices {
+		if deviceID != h.version.DeviceID {
+			h.t.Fatalf("desktop bridge device = %q, want registry device %q", deviceID, h.version.DeviceID)
+		}
+	}
+	for _, secret := range []string{"SELECT", "UPDATE", "dbo.", "sql.internal", "S3cret", "credentialRef", "internal_cost", m71AuditSecretCanary} {
 		if strings.Contains(strings.ToLower(text), strings.ToLower(secret)) {
 			h.t.Fatalf("audit leaked %q: %s", secret, text)
 		}
 	}
-	for _, public := range []string{`"connectorId":"sql-orders"`, `"adapter":"sqlserver"`, `"sourceProfileId":"erp-test"`, `"environment":"test"`, `"requestFingerprintId":"sha256:`} {
+	for _, public := range []string{`"connectorId":"sql-orders"`, `"adapter":"sqlserver"`, `"sourceProfileId":"erp-test"`, `"environment":"test"`, `"requestFingerprintId":"hmac-sha256:`} {
 		if !strings.Contains(text, public) {
 			h.t.Fatalf("audit missing public connector metadata %s: %s", public, text)
+		}
+	}
+	for _, entry := range chain.Entries() {
+		if entry.Connector != nil && (entry.DeviceID != h.version.DeviceID || entry.Connector.DeviceID != h.version.DeviceID) {
+			h.t.Fatalf("connector audit device is not registry-owned: %+v", entry)
 		}
 	}
 }
@@ -275,10 +290,12 @@ type m71DesktopBridge struct {
 	completionRate int
 	version        int
 	calls          int
+	devices        []string
 }
 
 func (b *m71DesktopBridge) InvokeLocalTool(_ context.Context, request connector.LocalToolRequest) (connector.LocalToolResponse, error) {
 	b.calls++
+	b.devices = append(b.devices, request.DeviceID)
 	base := connector.ExecutionMeta{
 		Status: "succeeded", ExecutionID: fmt.Sprintf("desktop-%d", b.calls),
 		IdempotencyKey: request.IdempotencyKey, SourceProfileID: "erp-test", Environment: "test",
@@ -299,7 +316,7 @@ func (b *m71DesktopBridge) InvokeLocalTool(_ context.Context, request connector.
 		}
 		b.completionRate, b.version = rate, b.version+1
 		after := m71Order(b.completionRate, b.version)
-		after["internal_cost"] = "S3cret"
+		after["internal_cost"] = m71AuditSecretCanary
 		base.Confirmed, base.ConfirmedAt, base.Before, base.After = true, "2026-07-13T10:00:00Z", before, after
 		base.ReadBackStatus = "succeeded"
 		return connector.LocalToolResponse{Data: after, Meta: base}, nil

@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -513,15 +512,19 @@ func (a *LLMAgent) record(p org.Principal, spec connector.ToolSpec, args map[str
 	spec = spec.WithDefaults()
 	resourceID, _ := args[spec.ResourceArg].(string)
 	before, after := meta.Before, meta.After
+	deviceID := turn.DeviceID
+	if spec.Adapter != "" && spec.DeviceID != "" {
+		deviceID = spec.DeviceID
+	}
 	var connectorAudit *ConnectorAudit
 	if spec.Execution == connector.ExecutionDesktop && spec.Adapter != "" {
 		before = filterConnectorAuditMap(meta.Before, spec.ResultFields)
 		after = filterConnectorAuditMap(meta.After, spec.ResultFields)
-		connectorAudit = buildConnectorAudit(spec, args, resourceID, turn.DeviceID, status, meta, before, after)
+		connectorAudit = buildConnectorAudit(spec, args, resourceID, deviceID, status, meta, before, after)
 	}
 	return a.audit.Append(AuditEntry{
 		TenantID: p.TenantID, UserID: p.UserID, SkillID: skillID,
-		RoleIDs: append([]string(nil), turn.RoleIDs...), DeviceID: turn.DeviceID,
+		RoleIDs: append([]string(nil), turn.RoleIDs...), DeviceID: deviceID,
 		Tool: spec.Name, ToolCallID: toolCallID, ToolVersion: spec.Version, ExecutionLocation: string(spec.Execution), Risk: string(spec.Risk),
 		Args: args, Decision: decision, Status: status, Reason: d.Reason,
 		ExecutionID: meta.ExecutionID, IdempotencyKey: meta.IdempotencyKey,
@@ -540,18 +543,10 @@ func buildConnectorAudit(spec connector.ToolSpec, args map[string]any, resourceI
 		Adapter: spec.Adapter, SourceProfileID: meta.SourceProfileID, Environment: spec.Environment,
 		DeviceID: deviceID, ResourceKind: spec.ResourceKind, ResourceID: resourceID,
 		ResourceRelation: spec.ResourceRelation, ApprovalVersion: spec.Version,
-		IdempotencyKeyID: oneWayAuditID([]byte(meta.IdempotencyKey)), RequestFingerprintID: oneWayAuditID(request),
+		idempotencyKeyMaterial: []byte(meta.IdempotencyKey), requestFingerprintMaterial: request,
 		ExecutionStatus: status, ReadBackStatus: meta.ReadBackStatus, DurationMS: meta.DurationMS,
 		Before: before, After: after,
 	}
-}
-
-func oneWayAuditID(value []byte) string {
-	if len(value) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(value)
-	return "sha256:" + fmt.Sprintf("%x", sum[:])
 }
 
 func (a *LLMAgent) emitToolState(sink EventSink, spec connector.ToolSpec, tool, status string) {

@@ -52,10 +52,6 @@ async function chat(
   deviceOptions: ChatDeviceOptions = {},
 ): Promise<string> {
   const referenceDeviceId = os.hostname();
-  const connectorDeviceId = typeof deviceOptions.connectorDeviceId === "string"
-    && deviceOptions.connectorDeviceId.length > 0
-    ? deviceOptions.connectorDeviceId
-    : referenceDeviceId;
   const res = await fetch(BASE + "/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -89,7 +85,7 @@ async function chat(
           ...eventRequest,
           deviceId: eventRequest.packageId === "reference-manufacturing"
             ? referenceDeviceId
-            : connectorDeviceId,
+            : eventRequest.deviceId,
         };
         let out: LocalToolResponse;
         try {

@@ -562,6 +562,37 @@ func TestLLM_LocalExecutionAuditSucceededAndRedacted(t *testing.T) {
 	}
 }
 
+func TestLLM_DynamicConnectorAuditUsesRegistryDevice(t *testing.T) {
+	meta := connector.ExecutionMeta{
+		Status: "succeeded", ExecutionID: "desktop-exec-1", IdempotencyKey: localAuditIdempotencyKey(),
+		SourceProfileID: "erp-test", Environment: "test", ReadBackStatus: "not_applicable",
+	}
+	spec := localAuditSpec()
+	spec.Adapter = "sqlserver"
+	spec.Environment = "test"
+	spec.DeviceID = "registry-device"
+	tool := &localAuditTool{spec: spec, data: map[string]any{
+		"orderId": "SO-1001", connector.ExecutionMetaKey: meta,
+	}}
+	chk := fakeChecker{allow: map[string]bool{
+		"user:u1|invoker|tool:t/report_production_progress": true,
+		"user:u1|viewer|business_record:t/order/SO-1001":    true,
+	}}
+	agent, audit, _, _ := localAuditAgent(t, tool, chk)
+	ctx := connector.WithDeviceID(context.Background(), "forged-chat-device")
+	if _, _, err := agent.Ask(ctx, org.Principal{TenantID: "t", UserID: "u1"}, nil, "update", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := audit.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(entries))
+	}
+	if entries[0].DeviceID != "registry-device" || entries[0].Connector == nil || entries[0].Connector.DeviceID != "registry-device" {
+		t.Fatalf("dynamic connector audit device = %+v, want registry device", entries[0])
+	}
+}
+
 func TestLLM_LocalExecutionAuditTerminalStates(t *testing.T) {
 	cases := []struct {
 		name         string

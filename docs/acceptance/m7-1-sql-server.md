@@ -91,11 +91,30 @@ the generated pair.
 
 ```powershell
 wsl.exe -e bash -lc 'set -eu; d=/mnt/c/Users/'"$env:USERNAME"'/AppData/Local/merchantAgent-m7-acceptance; openssl genpkey -algorithm ED25519 -out "$d/platform-private.pem"; openssl pkey -in "$d/platform-private.pem" -pubout -out "$d/platform-public.pem"; chmod 600 "$d/platform-private.pem"'
-Copy-Item "$Acceptance\platform-public.pem" "$Repo\desktop\resources\implementation\platform-public.pem" -Force
-Set-Location "$Repo\desktop"
-npm run dist:dir
+$PlatformKeyRelative = 'desktop/resources/implementation/platform-public.pem'
+$PlatformKey = Join-Path $Repo $PlatformKeyRelative
+if ((git -C $Repo status --short -- $PlatformKeyRelative) -or
+    (git -C $Repo diff --cached --name-only -- $PlatformKeyRelative)) {
+  throw "Tracked platform key is not clean; preserve that work before acceptance."
+}
+$CanonicalPlatformKey = [IO.File]::ReadAllBytes($PlatformKey)
+try {
+  Copy-Item "$Acceptance\platform-public.pem" $PlatformKey -Force
+  Set-Location "$Repo\desktop"
+  npm run dist:dir
+  if ($LASTEXITCODE -ne 0) { throw "acceptance package build failed" }
+} finally {
+  [IO.File]::WriteAllBytes($PlatformKey, $CanonicalPlatformKey)
+}
+if (git -C $Repo status --short -- $PlatformKeyRelative) {
+  throw "Tracked platform key was not restored after packaging."
+}
 & "$Repo\desktop\dist\win-unpacked\merchantAgent.exe"
 ```
+
+The packaged `win-unpacked` now contains the acceptance public key, while the
+tracked source key has already been restored. Do not reuse that package after
+this acceptance run.
 
 Open Connector Workbench, record the device ID/fingerprint, then close the app.
 Export only the public device key:
@@ -205,16 +224,36 @@ files, connector registry, and audit JSON.
 
 ## 9. Cleanup
 
-Delete the scoped entry in Windows Credential Manager and verify the next call
-reports missing credentials. Then:
+First close all packaged app windows and stop WSL terminal 1. Run the following
+even when any earlier acceptance step fails. It deletes the exact scoped
+Credential Manager target, verifies the target is gone, removes the package
+built with the acceptance key, and tears down backend/SQL material:
 
 ```powershell
-Remove-Item "$Acceptance\implementation-credential.txt","$Acceptance\platform-private.pem","$Acceptance\platform-public.pem","$Acceptance\device-public.pem" -Force
-git -C $Repo restore -- desktop/resources/implementation/platform-public.pem
+$CredentialTarget = 'com.merchantagent.connector/mock-corp-001/DEVICE_ID'
+Get-Process merchantAgent -ErrorAction SilentlyContinue | Stop-Process -Force
+wsl.exe -e bash -lc 'pkill -TERM -f "[c]md/agentd" 2>/dev/null || true'
+cmdkey.exe /delete:$CredentialTarget
+$CredentialListing = cmdkey.exe /list:$CredentialTarget 2>&1 | Out-String
+if ($CredentialListing -match [regex]::Escape($CredentialTarget)) {
+  throw "Credential Manager target still exists: $CredentialTarget"
+}
+Remove-Item "$Repo\desktop\dist\win-unpacked" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$Acceptance\implementation-credential.txt","$Acceptance\platform-private.pem","$Acceptance\platform-public.pem","$Acceptance\device-public.pem" -Force -ErrorAction SilentlyContinue
 wsl.exe -e bash -lc 'rm -rf "$HOME/.local/share/merchantagent-m7"; cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver && docker compose down -v --remove-orphans && rm -rf tls'
 ```
 
-Confirm `git status --short` contains no generated TLS/private material.
+Do not rebuild with the acceptance key. Confirm cleanup with scoped checks so
+unrelated worktree changes do not obscure the result:
+
+```powershell
+git -C $Repo status --short -- desktop/resources/implementation/platform-public.pem test/sqlserver
+Test-Path "$Repo\desktop\dist\win-unpacked"
+cmdkey.exe /list:$CredentialTarget
+```
+
+Expected: scoped Git status is empty, `Test-Path` is `False`, and the exact
+credential target is absent.
 
 ## Evidence Table
 

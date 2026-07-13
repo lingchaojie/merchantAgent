@@ -5,17 +5,22 @@
 package runtime
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
 
-var connectorAuditResultFields = map[string]struct{}{
-	"orderId": {}, "workOrderId": {}, "status": {}, "promiseDate": {},
-	"completionRate": {}, "note": {}, "version": {},
+const auditIdentifierKeySize = 32
+
+var connectorAuditMetricMaximum = map[string]int64{
+	"completionRate": 100,
+	"version":        math.MaxInt32,
 }
 
 // ConnectorAudit is the public, non-sensitive execution record for a desktop
@@ -40,6 +45,9 @@ type ConnectorAudit struct {
 	DurationMS           int64          `json:"durationMs"`
 	Before               map[string]any `json:"before,omitempty"`
 	After                map[string]any `json:"after,omitempty"`
+
+	idempotencyKeyMaterial     []byte
+	requestFingerprintMaterial []byte
 }
 
 // AuditEntry is one recorded agent action. Entries are hash-chained: each
@@ -83,21 +91,44 @@ type Appender interface {
 // AuditLog is an in-memory hash-chained log (Phase 0; a real impl ships entries
 // to a SIEM/append-only store).
 type AuditLog struct {
-	mu       sync.Mutex
-	entries  []AuditEntry
-	lastHash string
+	mu            sync.Mutex
+	entries       []AuditEntry
+	lastHash      string
+	identifierKey []byte
 }
 
-func NewAuditLog() *AuditLog { return &AuditLog{} }
+func NewAuditLog() *AuditLog {
+	return NewAuditLogWithIdentifierKey(randomAuditIdentifierKey())
+}
+
+// NewAuditLogWithIdentifierKey creates a log with a caller-supplied test key.
+// Production callers use NewAuditLog so identifiers rotate with the process.
+func NewAuditLogWithIdentifierKey(key []byte) *AuditLog {
+	if len(key) != auditIdentifierKeySize {
+		panic("audit identifier key must be 32 bytes")
+	}
+	return &AuditLog{identifierKey: append([]byte(nil), key...)}
+}
 
 // TenantAudit keeps one independent hash chain per tenant (design §7): a tenant
 // is the isolation + "boss reviews audit" boundary, so chains must not interleave.
 type TenantAudit struct {
-	mu     sync.Mutex
-	chains map[string]*AuditLog
+	mu            sync.Mutex
+	chains        map[string]*AuditLog
+	identifierKey []byte
 }
 
-func NewTenantAudit() *TenantAudit { return &TenantAudit{chains: map[string]*AuditLog{}} }
+func NewTenantAudit() *TenantAudit {
+	return NewTenantAuditWithIdentifierKey(randomAuditIdentifierKey())
+}
+
+// NewTenantAuditWithIdentifierKey creates deterministic tenant chains for tests.
+func NewTenantAuditWithIdentifierKey(key []byte) *TenantAudit {
+	if len(key) != auditIdentifierKeySize {
+		panic("audit identifier key must be 32 bytes")
+	}
+	return &TenantAudit{chains: map[string]*AuditLog{}, identifierKey: append([]byte(nil), key...)}
+}
 
 // Chain returns (creating if needed) the log for a tenant.
 func (ta *TenantAudit) Chain(tenantID string) *AuditLog {
@@ -105,7 +136,7 @@ func (ta *TenantAudit) Chain(tenantID string) *AuditLog {
 	defer ta.mu.Unlock()
 	lg, ok := ta.chains[tenantID]
 	if !ok {
-		lg = NewAuditLog()
+		lg = NewAuditLogWithIdentifierKey(ta.identifierKey)
 		ta.chains[tenantID] = lg
 	}
 	return lg
@@ -118,15 +149,26 @@ func (ta *TenantAudit) Append(e AuditEntry) error {
 
 // Append records an entry, computing its hash over (prevHash + entry payload).
 func (a *AuditLog) Append(e AuditEntry) error {
-	cloned, err := cloneAuditEntry(e)
+	prepared := e
+	if e.Connector != nil {
+		connector := *e.Connector
+		connector.Before = filterConnectorAuditMap(connector.Before, nil)
+		connector.After = filterConnectorAuditMap(connector.After, nil)
+		connector.IdempotencyKeyID = deriveAuditIdentifier(a.identifierKey, e.TenantID, "idempotency", connector.idempotencyKeyMaterial)
+		connector.RequestFingerprintID = deriveAuditIdentifier(a.identifierKey, e.TenantID, "request-fingerprint", connector.requestFingerprintMaterial)
+		clear(e.Connector.idempotencyKeyMaterial)
+		clear(e.Connector.requestFingerprintMaterial)
+		e.Connector.idempotencyKeyMaterial = nil
+		e.Connector.requestFingerprintMaterial = nil
+		connector.idempotencyKeyMaterial = nil
+		connector.requestFingerprintMaterial = nil
+		prepared.Connector = &connector
+		prepared.Before = filterConnectorAuditMap(e.Before, nil)
+		prepared.After = filterConnectorAuditMap(e.After, nil)
+	}
+	cloned, err := cloneAuditEntry(prepared)
 	if err != nil {
 		return fmt.Errorf("copy audit entry: %w", err)
-	}
-	if cloned.Connector != nil {
-		cloned.Connector.Before = filterConnectorAuditMap(cloned.Connector.Before, nil)
-		cloned.Connector.After = filterConnectorAuditMap(cloned.Connector.After, nil)
-		cloned.Before = filterConnectorAuditMap(cloned.Before, nil)
-		cloned.After = filterConnectorAuditMap(cloned.After, nil)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -148,25 +190,92 @@ func filterConnectorAuditMap(values map[string]any, declared []string) map[strin
 	if len(values) == 0 {
 		return nil
 	}
-	allowed := connectorAuditResultFields
+	allowed := connectorAuditMetricMaximum
 	if len(declared) > 0 {
-		allowed = make(map[string]struct{}, len(declared))
+		allowed = make(map[string]int64, len(declared))
 		for _, field := range declared {
-			if _, fixed := connectorAuditResultFields[field]; fixed {
-				allowed[field] = struct{}{}
+			if maximum, fixed := connectorAuditMetricMaximum[field]; fixed {
+				allowed[field] = maximum
 			}
 		}
 	}
 	filtered := make(map[string]any, len(allowed))
 	for key, value := range values {
-		if _, ok := allowed[key]; ok {
-			filtered[key] = value
+		maximum, ok := allowed[key]
+		if !ok {
+			continue
+		}
+		integer, ok := connectorAuditInteger(value)
+		if ok && integer >= 0 && integer <= maximum {
+			filtered[key] = int(integer)
 		}
 	}
 	if len(filtered) == 0 {
 		return nil
 	}
 	return filtered
+}
+
+func connectorAuditInteger(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int:
+		return int64(number), true
+	case int8:
+		return int64(number), true
+	case int16:
+		return int64(number), true
+	case int32:
+		return int64(number), true
+	case int64:
+		return number, true
+	case uint:
+		if uint64(number) <= math.MaxInt64 {
+			return int64(number), true
+		}
+	case uint8:
+		return int64(number), true
+	case uint16:
+		return int64(number), true
+	case uint32:
+		return int64(number), true
+	case uint64:
+		if number <= math.MaxInt64 {
+			return int64(number), true
+		}
+	case float32:
+		return finiteInteger(float64(number))
+	case float64:
+		return finiteInteger(number)
+	}
+	return 0, false
+}
+
+func finiteInteger(number float64) (int64, bool) {
+	if math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number || number < math.MinInt64 || number > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(number), true
+}
+
+func randomAuditIdentifierKey() []byte {
+	key := make([]byte, auditIdentifierKeySize)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Sprintf("generate audit identifier key: %v", err))
+	}
+	return key
+}
+
+func deriveAuditIdentifier(key []byte, tenantID, domain string, material []byte) string {
+	if len(material) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(domain))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(tenantID))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write(material)
+	return "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
 }
 
 // Entries returns a copy of the log.

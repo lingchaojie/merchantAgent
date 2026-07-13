@@ -49,6 +49,7 @@ func (b *capturingLocalBridge) InvokeLocalTool(_ context.Context, req connector.
 
 func TestPublishedCatalogMapsPublicContractAndInvokesApprovedDigest(t *testing.T) {
 	v := validSubmittedVersion()
+	v.DeviceID = "registry-device"
 	catalog := NewPublishedCatalog(publishedVersionsStub{versions: []Version{v}}, v.TenantID)
 	tools, err := catalog.Snapshot(context.Background())
 	if err != nil {
@@ -59,7 +60,7 @@ func TestPublishedCatalogMapsPublicContractAndInvokesApprovedDigest(t *testing.T
 		t.Fatal("published tool missing")
 	}
 	spec := tool.Spec()
-	if spec.PackageID != v.ConnectorID || spec.Version != v.Version || spec.ManifestDigest != v.Digest || spec.Execution != connector.ExecutionDesktop {
+	if spec.PackageID != v.ConnectorID || spec.Version != v.Version || spec.ManifestDigest != v.Digest || spec.DeviceID != "registry-device" || spec.Execution != connector.ExecutionDesktop {
 		t.Fatalf("published spec identity = %+v", spec)
 	}
 	param := spec.Params[0]
@@ -69,7 +70,7 @@ func TestPublishedCatalogMapsPublicContractAndInvokesApprovedDigest(t *testing.T
 
 	bridge := &capturingLocalBridge{}
 	ctx := connector.WithInvocation(context.Background(), connector.InvocationMeta{
-		TenantID: v.TenantID, UserID: "u1", SkillID: "orders", CallID: "call-1", DeviceID: "device-01", RoleIDs: []string{"planner"},
+		TenantID: v.TenantID, UserID: "u1", SkillID: "orders", CallID: "call-1", DeviceID: "forged-chat-device", RoleIDs: []string{"planner"},
 	})
 	ctx = connector.WithLocalToolBridge(ctx, bridge)
 	data, err := tool.Invoke(ctx, map[string]any{"orderId": "SO-1001"})
@@ -78,6 +79,9 @@ func TestPublishedCatalogMapsPublicContractAndInvokesApprovedDigest(t *testing.T
 	}
 	if bridge.req.PackageID != v.ConnectorID || bridge.req.PackageVersion != v.Version || bridge.req.ManifestDigest != v.Digest || bridge.req.Tool != "query_order_status" {
 		t.Fatalf("local request identity = %+v", bridge.req)
+	}
+	if bridge.req.DeviceID != "registry-device" {
+		t.Fatalf("local request device = %q, want registry device", bridge.req.DeviceID)
 	}
 	if bridge.req.IdempotencyKey != connector.ExpectedIdempotencyKey(connector.InvocationMeta{TenantID: v.TenantID, UserID: "u1", CallID: "call-1"}, "query_order_status") {
 		t.Fatalf("idempotency key = %q", bridge.req.IdempotencyKey)

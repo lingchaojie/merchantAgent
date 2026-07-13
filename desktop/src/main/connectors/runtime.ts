@@ -175,7 +175,7 @@ function checkedTool(connector: LoadedApprovedConnector, request: LocalToolReque
   } catch {
     throw new ConnectorError("invalid_argument", "invalid_argument");
   }
-  return { operation, preparedArgs };
+  return { contract, operation, preparedArgs };
 }
 
 function normalizedError(error: unknown): ConnectorErrorCode {
@@ -242,13 +242,19 @@ export class ConnectorRuntime {
         sourceProfileId: connector.payload.profile.profileId,
         environment: connector.manifest.environment,
       };
-      const { operation, preparedArgs } = checkedTool(connector, request);
+      const { contract, operation, preparedArgs } = checkedTool(connector, request);
       const credential = await this.dependencies.vault.get(connector.payload.profile.credentialRef);
       if (credential === null) throw new ConnectorError("missing_credentials", "missing_credentials");
       const source = this.dependencies.createSource(connector);
       if (operation.kind === "read") {
         const rows = await source.executeRead(operation, preparedArgs, controller.signal);
-        return { data: { rows }, meta: { ...baseMeta, ...publicMeta("not_applicable"), status: "succeeded" } };
+        if (rows.length === 0) throw new ConnectorError("record_not_found", "record_not_found");
+        if (rows.length !== 1) throw new ConnectorError("source_rejected", "source_rejected");
+        const data: Record<string, unknown> = {};
+        for (const field of contract.resultFields) {
+          if (Object.hasOwn(rows[0], field)) data[field] = rows[0][field];
+        }
+        return { data, meta: { ...baseMeta, ...publicMeta("not_applicable"), status: "succeeded" } };
       }
       const resumed = await source.resumeUpdate(operation, preparedArgs, request.idempotencyKey, controller.signal);
       if (resumed !== null) {
