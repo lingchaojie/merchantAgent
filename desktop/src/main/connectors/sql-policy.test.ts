@@ -114,7 +114,7 @@ function fixturePayload(operation: SQLReadOperation): ConnectorPrivatePayload {
       trustServerCertificate: false,
       connectTimeoutMS: 5_000,
       queryTimeoutMS: 10_000,
-      credentialRef: "erp-test",
+      credentialRef: "erp-test-credential",
       environment: "test",
     },
     operations: [operation],

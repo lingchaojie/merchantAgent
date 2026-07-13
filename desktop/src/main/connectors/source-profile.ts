@@ -131,6 +131,9 @@ export function validateSQLServerProfile(profile: SQLServerProfile): void {
   if (!isCredentialRef(profile.credentialRef)) {
     throw new ConnectorError("invalid_argument", "SQL Server credential ref is invalid");
   }
+  if (profile.profileId === profile.credentialRef) {
+    throw new ConnectorError("invalid_argument", "SQL Server credential ref must differ from the profile ID");
+  }
   if (profile.caPath !== undefined) {
     if (!fixedString(profile.caPath)) throw tlsFailure();
     requireLocalCertificatePath(profile.caPath);

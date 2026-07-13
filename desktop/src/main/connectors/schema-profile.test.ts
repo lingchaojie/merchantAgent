@@ -17,7 +17,7 @@ function fixturePayload(): ConnectorPrivatePayload {
       trustServerCertificate: false,
       connectTimeoutMS: 5_000,
       queryTimeoutMS: 10_000,
-      credentialRef: "erp-test",
+      credentialRef: "erp-test-credential",
       environment: "test",
     },
     operations: [
@@ -68,7 +68,14 @@ function fixturePayload(): ConnectorPrivatePayload {
 
 describe("SQL Server profile schema", () => {
   it("accepts an opaque credential ref", () => {
-    expect(parseConnectorPrivatePayload(fixturePayload()).profile.credentialRef).toBe("erp-test");
+    expect(parseConnectorPrivatePayload(fixturePayload()).profile.credentialRef).toBe("erp-test-credential");
+  });
+
+  it("rejects a credential ref that aliases the public profile ID", () => {
+    const payload = fixturePayload();
+    payload.profile.credentialRef = payload.profile.profileId;
+
+    expect(() => parseConnectorPrivatePayload(payload)).toThrowError("credentialRef");
   });
 
   it.each([

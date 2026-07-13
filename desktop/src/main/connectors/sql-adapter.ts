@@ -432,7 +432,8 @@ function projectRows(
   maxResults: number,
 ): Record<string, unknown>[] {
   if (!Array.isArray(recordset)) throw publicError("failed");
-  return recordset.slice(0, maxResults).map((value) => {
+  if (recordset.length > maxResults) throw publicError("source_rejected");
+  return recordset.map((value) => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) throw publicError("failed");
     const row = value as Record<string, unknown>;
     const projected: Record<string, unknown> = {};
@@ -1193,7 +1194,8 @@ export class SQLServerAdapter {
       validateReadOperation(operation);
       const result = await queryWithAbort(request, operation.sql, signal);
       if (!Array.isArray(result.recordset)) throw publicError("failed");
-      const raw = strictJSONSnapshot(result.recordset.slice(0, operation.maxResults));
+      if (result.recordset.length > operation.maxResults) throw publicError("source_rejected");
+      const raw = strictJSONSnapshot(result.recordset);
       if (!Array.isArray(raw) || raw.some((row) => typeof row !== "object" || row === null || Array.isArray(row))) {
         throw publicError("failed");
       }

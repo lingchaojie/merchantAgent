@@ -20,7 +20,7 @@ function profile(): SQLServerProfile {
     trustServerCertificate: false,
     connectTimeoutMS: 5_000,
     queryTimeoutMS: 8_000,
-    credentialRef: "erp-test",
+    credentialRef: "erp-test-credential",
     environment: "test",
   };
 }

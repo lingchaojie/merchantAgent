@@ -34,7 +34,7 @@ export interface WorkbenchEvidence {
 export const DEFAULT_PROFILE: ProfileForm = {
   connectorId: "sql-orders", version: "1.0.0", profileId: "erp-test", server: "",
   instance: "", port: "1433", database: "", caPath: "", connectTimeoutMS: 5_000,
-  queryTimeoutMS: 5_000, credentialRef: "erp-test", environment: "test",
+  queryTimeoutMS: 5_000, credentialRef: "erp-test-credential", environment: "test",
 };
 
 export const DEFAULT_OPERATIONS: OperationForm = {

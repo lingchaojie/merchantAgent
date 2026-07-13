@@ -83,7 +83,63 @@ before the visible procedure so `ORD-1001` is completion 45/version 1:
 wsl.exe -e bash -lc 'cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver && docker compose down -v --remove-orphans && ./generate-tls.sh && docker compose up -d'
 ```
 
-## 3. Platform Key, Device Key, and Credential
+## 3. Isolated Application State, Platform Key, Device Key, and Credential
+
+This procedure uses exact scoped backup/removal/restoration so the standard
+test user's existing connector state cannot be mistaken for acceptance state or
+destroyed by cleanup. Before the first packaged-app launch, stop the app and
+agentd, back up the device identity, the exact `sql-orders@1.0.0` installed
+envelope, and every SQLite execution-ledger file, then remove only those paths:
+
+```powershell
+$UserData = Join-Path $env:APPDATA 'merchant-agent-desktop'
+$ConnectorState = Join-Path $UserData 'connectors'
+$IdentityPath = Join-Path $ConnectorState 'device-identity.json'
+$InstalledPackagePath = Join-Path $ConnectorState 'sql-orders\1.0.0.ma-connector'
+$LedgerPath = Join-Path $ConnectorState 'executions.db'
+$StateBackup = Join-Path $Acceptance 'preflight-state-backup'
+$StateManifestPath = Join-Path $StateBackup 'manifest.json'
+$StatePaths = [ordered]@{
+  deviceIdentity = $IdentityPath
+  installedPackage = $InstalledPackagePath
+  executionLedger = $LedgerPath
+  executionLedgerWal = "${LedgerPath}-wal"
+  executionLedgerShm = "${LedgerPath}-shm"
+}
+
+Get-Process merchantAgent -ErrorAction SilentlyContinue | Stop-Process -Force
+wsl.exe -e bash -lc 'pkill -TERM -f "[c]md/agentd" 2>/dev/null || true'
+if (Test-Path -LiteralPath $StateBackup) {
+  throw "Stale state backup exists; restore or securely remove it before acceptance: $StateBackup"
+}
+New-Item -ItemType Directory -Path $StateBackup | Out-Null
+$StateManifest = foreach ($entry in $StatePaths.GetEnumerator()) {
+  $exists = Test-Path -LiteralPath $entry.Value -PathType Leaf
+  $backupPath = Join-Path $StateBackup "$($entry.Key).bin"
+  if ($exists) {
+    Copy-Item -LiteralPath $entry.Value -Destination $backupPath
+  }
+  [pscustomobject]@{
+    name = $entry.Key
+    path = $entry.Value
+    existed = $exists
+    backupPath = $backupPath
+    sha256 = if ($exists) { (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.Value).Hash } else { $null }
+    sddl = if ($exists) { (Get-Acl -LiteralPath $entry.Value).Sddl } else { $null }
+  }
+}
+$StateManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StateManifestPath -Encoding utf8NoBOM
+foreach ($state in $StateManifest) {
+  Remove-Item -LiteralPath $state.path -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $state.path) { throw "Could not isolate $($state.name): $($state.path)" }
+}
+```
+
+Do not proceed unless the manifest exists, every file that previously existed
+has a backup and hash, and all five live paths are absent. The backup can contain
+a DPAPI private key, implementation credential, and ledger data. Keep it local,
+never inspect or upload it, and restore/delete it in Step 9 even if acceptance
+fails.
 
 Generate an acceptance-only Ed25519 platform key outside the repository. Copy
 its public half only long enough to build the acceptance package; never commit
@@ -120,9 +176,9 @@ Open Connector Workbench, record the device ID/fingerprint, then close the app.
 Export only the public device key:
 
 ```powershell
-$IdentityPath = Join-Path $env:APPDATA 'merchant-agent-desktop\connectors\device-identity.json'
 $Identity = Get-Content -Raw $IdentityPath | ConvertFrom-Json
 [IO.File]::WriteAllText((Join-Path $Acceptance 'device-public.pem'), $Identity.devicePublicKeyPem)
+$Identity.deviceId | Set-Content -LiteralPath (Join-Path $Acceptance 'acceptance-device-id.txt') -Encoding ascii
 $Identity.deviceId
 icacls.exe $IdentityPath
 Select-String -Path $IdentityPath -Pattern 'encryptedPrivateKey','BEGIN PRIVATE KEY'
@@ -164,7 +220,7 @@ Unlock Workbench with the implementation credential. Use only:
 | --- | --- |
 | Environment | `test` |
 | Connector/version | `sql-orders` / `1.0.0` |
-| Profile/credential ref | `erp-test` / `erp-test` |
+| Profile/credential ref | `erp-test` / `erp-test-credential` |
 | Server/port/database | `localhost` / `11433` / `merchant_test` |
 | CA | `D:\merchantAgent\.worktrees\desktop-local-tools\test\sqlserver\tls\ca.crt` |
 | Username | `merchant_agent_test` |
@@ -208,7 +264,7 @@ credential and cannot retrieve the local implementation or credentials.
 
 Inspect Windows Credential Manager target
 `com.merchantagent.connector/mock-corp-001/DEVICE_ID`, account
-`credential/erp-test`. The app must never display its password.
+`credential/erp-test-credential`. The app must never display its password.
 
 ## 8. Visual and Raw-Result Acceptance
 
@@ -225,22 +281,68 @@ files, connector registry, and audit JSON.
 ## 9. Cleanup
 
 First close all packaged app windows and stop WSL terminal 1. Run the following
-even when any earlier acceptance step fails. It deletes the exact scoped
-Credential Manager target, verifies the target is gone, removes the package
-built with the acceptance key, and tears down backend/SQL material:
+even when any earlier acceptance step fails. It deletes the exact acceptance
+Credential Manager target, acceptance package, DPAPI device identity, installed
+connector envelope, and execution ledger; restores every preflight file with
+its original bytes and ACL; and tears down backend/SQL material:
 
 ```powershell
-$CredentialTarget = 'com.merchantagent.connector/mock-corp-001/DEVICE_ID'
+$AcceptanceDeviceIdPath = Join-Path $Acceptance 'acceptance-device-id.txt'
+$AcceptanceDeviceId = if (Test-Path -LiteralPath $AcceptanceDeviceIdPath -PathType Leaf) {
+  (Get-Content -Raw -LiteralPath $AcceptanceDeviceIdPath).Trim()
+} else { $null }
+$CredentialTarget = if ($AcceptanceDeviceId) {
+  "com.merchantagent.connector/mock-corp-001/$AcceptanceDeviceId"
+} else { $null }
+$UserData = Join-Path $env:APPDATA 'merchant-agent-desktop'
+$ConnectorState = Join-Path $UserData 'connectors'
+$StateBackup = Join-Path $Acceptance 'preflight-state-backup'
+$StateManifestPath = Join-Path $StateBackup 'manifest.json'
+if (!(Test-Path -LiteralPath $StateManifestPath -PathType Leaf)) {
+  throw "Preflight state manifest is missing: $StateManifestPath"
+}
+$StateManifest = @(Get-Content -Raw -LiteralPath $StateManifestPath | ConvertFrom-Json)
+
 Get-Process merchantAgent -ErrorAction SilentlyContinue | Stop-Process -Force
 wsl.exe -e bash -lc 'pkill -TERM -f "[c]md/agentd" 2>/dev/null || true'
-cmdkey.exe /delete:$CredentialTarget
-$CredentialListing = cmdkey.exe /list:$CredentialTarget 2>&1 | Out-String
-if ($CredentialListing -match [regex]::Escape($CredentialTarget)) {
-  throw "Credential Manager target still exists: $CredentialTarget"
+if ($CredentialTarget) {
+  cmdkey.exe /delete:$CredentialTarget
+  $CredentialListing = cmdkey.exe /list:$CredentialTarget 2>&1 | Out-String
+  if ($CredentialListing -match [regex]::Escape($CredentialTarget)) {
+    throw "Credential Manager target still exists: $CredentialTarget"
+  }
 }
 Remove-Item "$Repo\desktop\dist\win-unpacked" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "$Acceptance\implementation-credential.txt","$Acceptance\platform-private.pem","$Acceptance\platform-public.pem","$Acceptance\device-public.pem" -Force -ErrorAction SilentlyContinue
 wsl.exe -e bash -lc 'rm -rf "$HOME/.local/share/merchantagent-m7"; cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver && docker compose down -v --remove-orphans && rm -rf tls'
+
+foreach ($state in $StateManifest) {
+  Remove-Item -LiteralPath $state.path -Force -ErrorAction SilentlyContinue
+  if ($state.existed) {
+    if (!(Test-Path -LiteralPath $state.backupPath -PathType Leaf)) {
+      throw "Backup is missing for $($state.name): $($state.backupPath)"
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $state.path) | Out-Null
+    Copy-Item -LiteralPath $state.backupPath -Destination $state.path
+    $acl = Get-Acl -LiteralPath $state.path
+    $acl.SetSecurityDescriptorSddlForm($state.sddl)
+    Set-Acl -LiteralPath $state.path -AclObject $acl
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $state.path).Hash -ne $state.sha256) {
+      throw "Restored bytes differ for $($state.name): $($state.path)"
+    }
+    if ((Get-Acl -LiteralPath $state.path).Sddl -ne $state.sddl) {
+      throw "Restored ACL differs for $($state.name): $($state.path)"
+    }
+  } elseif (Test-Path -LiteralPath $state.path) {
+    throw "Acceptance state remains for $($state.name): $($state.path)"
+  }
+}
+$InstalledPackageDirectory = Join-Path $ConnectorState 'sql-orders'
+if ((Test-Path -LiteralPath $InstalledPackageDirectory) -and
+    (Get-ChildItem -Force -LiteralPath $InstalledPackageDirectory | Measure-Object).Count -eq 0) {
+  Remove-Item -LiteralPath $InstalledPackageDirectory -Force
+}
+Remove-Item "$Acceptance\implementation-credential.txt","$Acceptance\platform-private.pem","$Acceptance\platform-public.pem","$Acceptance\device-public.pem","$Acceptance\acceptance-device-id.txt" -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $StateBackup -Recurse -Force
 ```
 
 Do not rebuild with the acceptance key. Confirm cleanup with scoped checks so
@@ -249,11 +351,15 @@ unrelated worktree changes do not obscure the result:
 ```powershell
 git -C $Repo status --short -- desktop/resources/implementation/platform-public.pem test/sqlserver
 Test-Path "$Repo\desktop\dist\win-unpacked"
-cmdkey.exe /list:$CredentialTarget
+if ($CredentialTarget) { cmdkey.exe /list:$CredentialTarget }
+$StateManifest | Select-Object name,existed,path
+Test-Path -LiteralPath $StateBackup
 ```
 
 Expected: scoped Git status is empty, `Test-Path` is `False`, and the exact
-credential target is absent.
+credential target is absent. The state manifest transcript must show each
+scoped path and whether an original file was restored; its recorded hash and ACL
+checks must have completed without error. The state-backup path must be absent.
 
 ## Evidence Table
 
@@ -276,6 +382,6 @@ mark Windows-only rows from WSL automation.
 | Implementer/admin authority separation | PENDING WINDOWS | |
 | 1000x720 desktop layout | PENDING WINDOWS | |
 | 900x700 Workbench/admin layout | PENDING WINDOWS | |
-| Credential/fixture/TLS/key cleanup | PENDING WINDOWS | |
+| Device/package/ledger/credential/fixture/TLS/key cleanup or exact restoration | PENDING WINDOWS | |
 
 Final result is PASS only when every row is PASS against the recorded commit.

@@ -384,8 +384,13 @@ function parseProfile(value: unknown, path: string): SQLServerProfile {
     "connectTimeoutMS", "queryTimeoutMS", "credentialRef", "environment",
   ]);
   if (raw.encrypt !== true || raw.trustServerCertificate !== false) fail(path, "must require verified TLS");
+  const profileId = identifier(raw.profileId, `${path}.profileId`);
+  const parsedCredentialRef = credentialRef(raw.credentialRef, `${path}.credentialRef`);
+  if (profileId === parsedCredentialRef) {
+    fail(`${path}.credentialRef`, "must be distinct from profileId");
+  }
   return {
-    profileId: identifier(raw.profileId, `${path}.profileId`),
+    profileId,
     server: string(raw.server, `${path}.server`),
     ...(raw.instance === undefined ? {} : { instance: string(raw.instance, `${path}.instance`) }),
     ...(raw.port === undefined ? {} : { port: integer(raw.port, `${path}.port`, 1, 65535) }),
@@ -395,7 +400,7 @@ function parseProfile(value: unknown, path: string): SQLServerProfile {
     ...(raw.caPath === undefined ? {} : { caPath: string(raw.caPath, `${path}.caPath`) }),
     connectTimeoutMS: integer(raw.connectTimeoutMS, `${path}.connectTimeoutMS`, 1_000, 30_000),
     queryTimeoutMS: integer(raw.queryTimeoutMS, `${path}.queryTimeoutMS`, 1_000, 10_000),
-    credentialRef: credentialRef(raw.credentialRef, `${path}.credentialRef`),
+    credentialRef: parsedCredentialRef,
     environment: enumValue(raw.environment, `${path}.environment`, ["test", "preproduction"] as const),
   };
 }

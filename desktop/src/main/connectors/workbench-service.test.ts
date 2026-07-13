@@ -26,7 +26,7 @@ function draft(draftId = "draft-1"): ConnectorDraft {
         trustServerCertificate: false,
         connectTimeoutMS: 5_000,
         queryTimeoutMS: 5_000,
-        credentialRef: "erp-test",
+        credentialRef: "erp-test-credential",
         environment: "test",
       },
       operations: [{
@@ -325,7 +325,7 @@ describe("WorkbenchService isolation", () => {
   it("writes credentials without exposing a read method and freezes before submit", async () => {
     const f = fixture();
     const session = await f.service.unlock("encoded");
-    await f.service.saveCredential(session.sessionId, "erp-test", { username: "svc", password: "secret" });
+    await f.service.saveCredential(session.sessionId, "erp-test-credential", { username: "svc", password: "secret" });
     await f.service.saveDraft(session.sessionId, draft());
 
     const summary = await f.service.validateAndFreeze(session.sessionId, "draft-1");

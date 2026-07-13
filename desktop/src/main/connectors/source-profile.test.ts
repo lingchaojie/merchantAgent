@@ -45,7 +45,7 @@ function fixtureProfile(): SQLServerProfile {
     trustServerCertificate: false,
     connectTimeoutMS: 5_000,
     queryTimeoutMS: 10_000,
-    credentialRef: "erp-test",
+    credentialRef: "erp-test-credential",
     environment: "test",
   };
 }
@@ -86,6 +86,7 @@ describe("validateSQLServerProfile", () => {
     ["short query timeout", { queryTimeoutMS: 999 }],
     ["long query timeout", { queryTimeoutMS: 10_001 }],
     ["unsafe credential ref", { credentialRef: "credential://erp-test" }],
+    ["profile ID and credential ref alias", { credentialRef: "erp-test" }],
   ])("rejects %s", (_name, override) => {
     expect(() => validateSQLServerProfile({ ...fixtureProfile(), ...override } as SQLServerProfile)).toThrowError(
       "invalid_argument",

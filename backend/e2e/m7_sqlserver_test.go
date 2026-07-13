@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +23,34 @@ import (
 	"github.com/merchantagent/backend/wire"
 )
 
-const m71AuditSecretCanary = "m71-private-audit-canary"
+func m71ForbiddenAuditCanaries() map[string]string {
+	return map[string]string{
+		"sql_text":                  "SELECT m71_sql_text_canary FROM forbidden_source",
+		"schema_table_object":       "m71_secret_schema.m71_secret_table",
+		"server_address":            "m71-secret-sql.invalid:1433",
+		"database":                  "m71_secret_database",
+		"username":                  "m71_secret_service_user",
+		"credential_ref":            "m71-secret-credential-ref",
+		"credential_value":          "m71-secret-credential-value",
+		"password":                  "m71-secret-password-value",
+		"order_test_input":          "M71-SECRET-ORDER-INPUT",
+		"work_order_test_input":     "M71-SECRET-WORK-ORDER-INPUT",
+		"raw_row_internal_cost":     "m71-secret-raw-row-internal-cost",
+		"raw_response":              "m71-secret-raw-source-response",
+		"implementation_credential": "m71-secret-implementation-credential",
+		"private_key":               "-----BEGIN PRIVATE KEY-----\nM71-SECRET-PRIVATE-KEY-CANARY\n-----END PRIVATE KEY-----",
+	}
+}
+
+func m71EncodedPrivateKeyCanaries(privateKey string) []string {
+	escaped, _ := json.Marshal(privateKey)
+	return []string{
+		base64.StdEncoding.EncodeToString([]byte(privateKey)),
+		base64.RawURLEncoding.EncodeToString([]byte(privateKey)),
+		hex.EncodeToString([]byte(privateKey)),
+		string(escaped[1 : len(escaped)-1]),
+	}
+}
 
 func TestM71SQLServerVertical(t *testing.T) {
 	h := newM71Harness(t)
@@ -150,9 +179,23 @@ func (h *m71Harness) ExpectAuditChainValidAndSecretFree() {
 			h.t.Fatalf("desktop bridge device = %q, want registry device %q", deviceID, h.version.DeviceID)
 		}
 	}
-	for _, secret := range []string{"SELECT", "UPDATE", "dbo.", "sql.internal", "S3cret", "credentialRef", "internal_cost", m71AuditSecretCanary} {
-		if strings.Contains(strings.ToLower(text), strings.ToLower(secret)) {
-			h.t.Fatalf("audit leaked %q: %s", secret, text)
+	for category, canary := range m71ForbiddenAuditCanaries() {
+		if h.bridge.injectedCanaries[category] != canary {
+			h.t.Fatalf("desktop bridge did not inject %s canary through the runtime path", category)
+		}
+		forms := []string{canary}
+		if category == "private_key" {
+			for _, encoded := range m71EncodedPrivateKeyCanaries(canary) {
+				if !h.bridge.injectedPrivateKeyForms[encoded] {
+					h.t.Fatal("desktop bridge did not inject an encoded private-key canary through the runtime path")
+				}
+				forms = append(forms, encoded)
+			}
+		}
+		for _, forbidden := range forms {
+			if strings.Contains(text, forbidden) {
+				h.t.Fatalf("audit leaked %s canary form %q: %s", category, forbidden, text)
+			}
 		}
 	}
 	for _, public := range []string{`"connectorId":"sql-orders"`, `"adapter":"sqlserver"`, `"sourceProfileId":"erp-test"`, `"environment":"test"`, `"requestFingerprintId":"hmac-sha256:`} {
@@ -287,10 +330,31 @@ func (e *m71WriteExpectation) ExpectSucceededVersion(version int) {
 }
 
 type m71DesktopBridge struct {
-	completionRate int
-	version        int
-	calls          int
-	devices        []string
+	completionRate          int
+	version                 int
+	calls                   int
+	devices                 []string
+	injectedCanaries        map[string]string
+	injectedPrivateKeyForms map[string]bool
+}
+
+func (b *m71DesktopBridge) injectPrivateCanaries(target map[string]any) {
+	if b.injectedCanaries == nil {
+		b.injectedCanaries = make(map[string]string)
+	}
+	for category, canary := range m71ForbiddenAuditCanaries() {
+		target["private_"+category] = canary
+		b.injectedCanaries[category] = canary
+		if category == "private_key" {
+			if b.injectedPrivateKeyForms == nil {
+				b.injectedPrivateKeyForms = make(map[string]bool)
+			}
+			for index, encoded := range m71EncodedPrivateKeyCanaries(canary) {
+				target[fmt.Sprintf("private_key_encoded_%d", index)] = encoded
+				b.injectedPrivateKeyForms[encoded] = true
+			}
+		}
+	}
 }
 
 func (b *m71DesktopBridge) InvokeLocalTool(_ context.Context, request connector.LocalToolRequest) (connector.LocalToolResponse, error) {
@@ -303,11 +367,13 @@ func (b *m71DesktopBridge) InvokeLocalTool(_ context.Context, request connector.
 	}
 	data := m71Order(b.completionRate, b.version)
 	data["cost"] = 999
+	b.injectPrivateCanaries(data)
 	switch request.Tool {
 	case "query_order_status":
 		return connector.LocalToolResponse{Data: data, Meta: base}, nil
 	case "report_production_progress":
 		before := m71Order(b.completionRate, b.version)
+		b.injectPrivateCanaries(before)
 		rate := m71Int(request.Args["completionRate"])
 		expected := m71Int(request.Args["expectedVersion"])
 		if expected != b.version {
@@ -316,7 +382,7 @@ func (b *m71DesktopBridge) InvokeLocalTool(_ context.Context, request connector.
 		}
 		b.completionRate, b.version = rate, b.version+1
 		after := m71Order(b.completionRate, b.version)
-		after["internal_cost"] = m71AuditSecretCanary
+		b.injectPrivateCanaries(after)
 		base.Confirmed, base.ConfirmedAt, base.Before, base.After = true, "2026-07-13T10:00:00Z", before, after
 		base.ReadBackStatus = "succeeded"
 		return connector.LocalToolResponse{Data: after, Meta: base}, nil

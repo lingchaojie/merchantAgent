@@ -18,7 +18,7 @@ function fixtureProfile(overrides: Partial<SQLServerProfile> = {}): SQLServerPro
     trustServerCertificate: false,
     connectTimeoutMS: 5_000,
     queryTimeoutMS: 8_000,
-    credentialRef: "erp-test",
+    credentialRef: "erp-test-credential",
     environment: "test",
     ...overrides,
   };
@@ -107,7 +107,6 @@ describe("SQLServerAdapter.executeRead", () => {
       recordset: [
         { order_id: "ORD-1001", order_status: "queued", internal_cost: 900 },
         { order_id: "ORD-1002", order_status: "queued", internal_cost: 800 },
-        { order_id: "ORD-1003", order_status: "queued", internal_cost: 700 },
       ],
     });
     const pool = fakePool(request);
@@ -140,12 +139,11 @@ describe("SQLServerAdapter.executeRead", () => {
     expect(pool.close).toHaveBeenCalledOnce();
   });
 
-  it("binds typed values, executes validated SQL unchanged, caps rows, and projects declared aliases only", async () => {
+  it("binds typed values, executes validated SQL unchanged, and projects a bounded list", async () => {
     const request = fakeRequest({
       recordset: [
         { order_id: "ORD-1001", order_status: "in_production", secret_cost: 900 },
         { order_id: "ORD-1002", order_status: "queued", secret_cost: 800 },
-        { order_id: "ORD-1003", order_status: "hidden", secret_cost: 700 },
       ],
     });
     const pool = fakePool(request);
@@ -165,6 +163,57 @@ describe("SQLServerAdapter.executeRead", () => {
     expect(JSON.stringify(result)).not.toContain("secret_cost");
     expect(pools.open).toHaveBeenCalledWith(expect.objectContaining({ requestTimeout: 3_000 }));
     expect(pool.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["zero", [], []],
+    ["one", [{ order_id: "ORD-1001", order_status: "in_production" }], [{ orderId: "ORD-1001", status: "in_production" }]],
+  ])("accepts %s source rows when maxResults is one", async (_name, recordset, expected) => {
+    const request = fakeRequest({ recordset });
+    const operation = fixtureReadOperation({
+      maxResults: 1,
+      sql: fixtureReadOperation().sql.replace("TOP 2", "TOP 1"),
+    });
+
+    await expect(new SQLServerAdapter(
+      fixtureProfile(),
+      fakeVault(),
+      factoryFor(fakePool(request)),
+    ).executeRead(operation, { orderId: "ORD-1001" })).resolves.toEqual(expected);
+  });
+
+  it("rejects source overflow before maxResults truncation", async () => {
+    const request = fakeRequest({ recordset: [
+      { order_id: "ORD-1001", order_status: "in_production" },
+      { order_id: "ORD-1001", order_status: "duplicate" },
+    ] });
+    const operation = fixtureReadOperation({
+      maxResults: 1,
+      sql: fixtureReadOperation().sql.replace("TOP 2", "TOP 1"),
+    });
+
+    await expect(new SQLServerAdapter(
+      fixtureProfile(),
+      fakeVault(),
+      factoryFor(fakePool(request)),
+    ).executeRead(operation, { orderId: "ORD-1001" })).rejects.toMatchObject({ code: "source_rejected" });
+  });
+
+  it("rejects Workbench raw overflow before maxResults truncation", async () => {
+    const request = fakeRequest({ recordset: [
+      { order_id: "ORD-1001", order_status: "in_production", internal_cost: 900 },
+      { order_id: "ORD-1001", order_status: "duplicate", internal_cost: 800 },
+    ] });
+    const operation = fixtureReadOperation({
+      maxResults: 1,
+      sql: fixtureReadOperation().sql.replace("TOP 2", "TOP 1"),
+    });
+
+    await expect(new SQLServerAdapter(
+      fixtureProfile(),
+      fakeVault(),
+      factoryFor(fakePool(request)),
+    ).executeWorkbenchRead(operation, { orderId: "ORD-1001" })).rejects.toMatchObject({ code: "source_rejected" });
   });
 
   it("resolves credentials immediately before each pool open", async () => {
@@ -327,7 +376,6 @@ describe("SQLServerAdapter.executeRead", () => {
       recordset: [
         { order_id: "ORD-1001", order_status: "ready", secret_cost: 900 },
         { order_id: "ORD-1002", order_status: "queued", secret_cost: 800 },
-        { order_id: "ORD-1003", order_status: "hidden", secret_cost: 700 },
       ],
     });
 
