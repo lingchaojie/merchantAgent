@@ -55,6 +55,8 @@ type ToolSpec struct {
 	PackageID            string
 	Version              string
 	ManifestDigest       string
+	Adapter              string
+	Environment          string
 	Name                 string
 	Description          string
 	Params               []ParamSpec

@@ -199,6 +199,7 @@ export class ConnectorRuntime {
   constructor(private readonly dependencies: ConnectorRuntimeDependencies) {}
 
   async execute(request: LocalToolRequest, confirm: Confirm): Promise<LocalToolResponse> {
+    const startedAt = Date.now();
     const executionId = (this.dependencies.executionId ?? randomUUID)();
     const baseMeta = {
       executionId,
@@ -207,6 +208,14 @@ export class ConnectorRuntime {
     };
     if (this.closed) return { meta: { ...baseMeta, status: "failed" }, error: "failed" };
     const controller = new AbortController();
+    let executionFacts: Pick<LocalToolResponse["meta"], "sourceProfileId" | "environment"> | undefined;
+    const publicMeta = (
+      readBackStatus: NonNullable<LocalToolResponse["meta"]["readBackStatus"]>,
+    ) => executionFacts === undefined ? {} : {
+      ...executionFacts,
+      readBackStatus,
+      durationMs: Math.max(0, Date.now() - startedAt),
+    };
     this.active.add(controller);
     try {
       if (this.dependencies.tenantId !== undefined && request.tenantId !== this.dependencies.tenantId) {
@@ -229,13 +238,17 @@ export class ConnectorRuntime {
         approval.digest,
         request.tenantId,
       );
+      executionFacts = {
+        sourceProfileId: connector.payload.profile.profileId,
+        environment: connector.manifest.environment,
+      };
       const { operation, preparedArgs } = checkedTool(connector, request);
       const credential = await this.dependencies.vault.get(connector.payload.profile.credentialRef);
       if (credential === null) throw new ConnectorError("missing_credentials", "missing_credentials");
       const source = this.dependencies.createSource(connector);
       if (operation.kind === "read") {
         const rows = await source.executeRead(operation, preparedArgs, controller.signal);
-        return { data: { rows }, meta: { ...baseMeta, status: "succeeded" } };
+        return { data: { rows }, meta: { ...baseMeta, ...publicMeta("not_applicable"), status: "succeeded" } };
       }
       const resumed = await source.resumeUpdate(operation, preparedArgs, request.idempotencyKey, controller.signal);
       if (resumed !== null) {
@@ -243,6 +256,7 @@ export class ConnectorRuntime {
           data: { ...resumed.result },
           meta: {
             ...baseMeta,
+            ...publicMeta("succeeded"),
             status: "succeeded",
             confirmed: true,
             confirmedAt: resumed.confirmedAt,
@@ -254,7 +268,7 @@ export class ConnectorRuntime {
       const preview = await source.previewUpdate(operation, preparedArgs, controller.signal);
       if (!await confirm(preview)) {
         return {
-          meta: { ...baseMeta, status: "cancelled", before: { ...preview.before } },
+          meta: { ...baseMeta, ...publicMeta("not_attempted"), status: "cancelled", before: { ...preview.before } },
           error: "cancelled",
         };
       }
@@ -270,6 +284,7 @@ export class ConnectorRuntime {
         data: { ...result },
         meta: {
           ...baseMeta,
+          ...publicMeta("succeeded"),
           status: "succeeded",
           confirmed: true,
           confirmedAt,
@@ -280,7 +295,8 @@ export class ConnectorRuntime {
     } catch (error) {
       const code = normalizedError(error);
       const status = code === "source_conflict" ? "source_conflict" : code === "unknown" ? "unknown" : "failed";
-      return { meta: { ...baseMeta, status }, error: code };
+      const readBackStatus = status === "unknown" ? "unknown" : "not_attempted";
+      return { meta: { ...baseMeta, ...publicMeta(readBackStatus), status }, error: code };
     } finally {
       this.active.delete(controller);
     }

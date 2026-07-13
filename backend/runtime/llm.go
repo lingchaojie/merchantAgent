@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -511,6 +512,13 @@ func (a *LLMAgent) record(p org.Principal, spec connector.ToolSpec, args map[str
 	}
 	spec = spec.WithDefaults()
 	resourceID, _ := args[spec.ResourceArg].(string)
+	before, after := meta.Before, meta.After
+	var connectorAudit *ConnectorAudit
+	if spec.Execution == connector.ExecutionDesktop && spec.Adapter != "" {
+		before = filterConnectorAuditMap(meta.Before, spec.ResultFields)
+		after = filterConnectorAuditMap(meta.After, spec.ResultFields)
+		connectorAudit = buildConnectorAudit(spec, args, resourceID, turn.DeviceID, status, meta, before, after)
+	}
 	return a.audit.Append(AuditEntry{
 		TenantID: p.TenantID, UserID: p.UserID, SkillID: skillID,
 		RoleIDs: append([]string(nil), turn.RoleIDs...), DeviceID: turn.DeviceID,
@@ -518,8 +526,32 @@ func (a *LLMAgent) record(p org.Principal, spec connector.ToolSpec, args map[str
 		Args: args, Decision: decision, Status: status, Reason: d.Reason,
 		ExecutionID: meta.ExecutionID, IdempotencyKey: meta.IdempotencyKey,
 		Confirmed: meta.Confirmed, ConfirmedAt: meta.ConfirmedAt, ResourceID: resourceID,
-		Before: meta.Before, After: meta.After,
+		Before: before, After: after, Connector: connectorAudit,
 	})
+}
+
+func buildConnectorAudit(spec connector.ToolSpec, args map[string]any, resourceID, deviceID, status string, meta connector.ExecutionMeta, before, after map[string]any) *ConnectorAudit {
+	request, _ := json.Marshal(struct {
+		Tool string         `json:"tool"`
+		Args map[string]any `json:"args"`
+	}{Tool: spec.Name, Args: args})
+	return &ConnectorAudit{
+		ConnectorID: spec.PackageID, Version: spec.Version, Digest: spec.ManifestDigest,
+		Adapter: spec.Adapter, SourceProfileID: meta.SourceProfileID, Environment: spec.Environment,
+		DeviceID: deviceID, ResourceKind: spec.ResourceKind, ResourceID: resourceID,
+		ResourceRelation: spec.ResourceRelation, ApprovalVersion: spec.Version,
+		IdempotencyKeyID: oneWayAuditID([]byte(meta.IdempotencyKey)), RequestFingerprintID: oneWayAuditID(request),
+		ExecutionStatus: status, ReadBackStatus: meta.ReadBackStatus, DurationMS: meta.DurationMS,
+		Before: before, After: after,
+	}
+}
+
+func oneWayAuditID(value []byte) string {
+	if len(value) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(value)
+	return "sha256:" + fmt.Sprintf("%x", sum[:])
 }
 
 func (a *LLMAgent) emitToolState(sink EventSink, spec connector.ToolSpec, tool, status string) {
@@ -593,6 +625,22 @@ func validateDesktopExecution(spec connector.ToolSpec, invocation connector.Invo
 	if strings.TrimSpace(meta.ExecutionID) == "" {
 		return invalid("execution metadata missing execution id")
 	}
+	if meta.DurationMS < 0 {
+		return invalid("execution metadata has invalid duration")
+	}
+	if spec.Adapter != "" {
+		if !publicAuditIdentifier(meta.SourceProfileID) {
+			return invalid("execution metadata has invalid source profile")
+		}
+		if meta.Environment != spec.Environment || (meta.Environment != "test" && meta.Environment != "preproduction") {
+			return invalid("execution metadata environment mismatch")
+		}
+		switch meta.ReadBackStatus {
+		case "not_applicable", "not_attempted", "succeeded", "failed", "unknown":
+		default:
+			return invalid("execution metadata has invalid read-back status")
+		}
+	}
 	switch meta.Status {
 	case "succeeded", "failed", "cancelled", "source_conflict", "unknown":
 	default:
@@ -615,6 +663,18 @@ func validateDesktopExecution(spec connector.ToolSpec, invocation connector.Invo
 		}
 	}
 	return meta, meta.Status, nil
+}
+
+func publicAuditIdentifier(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func filterResult(data map[string]any, fields []string, enforceAllowlist bool) map[string]any {

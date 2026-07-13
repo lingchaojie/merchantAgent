@@ -36,13 +36,17 @@ type LocalToolRequest struct {
 }
 
 type ExecutionMeta struct {
-	Status         string         `json:"status"`
-	ExecutionID    string         `json:"executionId"`
-	IdempotencyKey string         `json:"idempotencyKey"`
-	ConfirmedAt    string         `json:"confirmedAt"`
-	Confirmed      bool           `json:"confirmed"`
-	Before         map[string]any `json:"before"`
-	After          map[string]any `json:"after"`
+	Status          string         `json:"status"`
+	ExecutionID     string         `json:"executionId"`
+	IdempotencyKey  string         `json:"idempotencyKey"`
+	SourceProfileID string         `json:"sourceProfileId,omitempty"`
+	Environment     string         `json:"environment,omitempty"`
+	ReadBackStatus  string         `json:"readBackStatus,omitempty"`
+	DurationMS      int64          `json:"durationMs,omitempty"`
+	ConfirmedAt     string         `json:"confirmedAt"`
+	Confirmed       bool           `json:"confirmed"`
+	Before          map[string]any `json:"before"`
+	After           map[string]any `json:"after"`
 }
 
 type LocalToolResponse struct {

@@ -57,6 +57,10 @@ export interface ExecutionMeta {
   status: "succeeded" | "failed" | "cancelled" | "source_conflict" | "unknown";
   executionId: string;
   idempotencyKey: string;
+  sourceProfileId?: string;
+  environment?: "test" | "preproduction";
+  readBackStatus?: "not_applicable" | "not_attempted" | "succeeded" | "failed" | "unknown";
+  durationMs?: number;
   confirmed: boolean;
   confirmedAt?: string;
   before?: Record<string, unknown>;

@@ -1,6 +1,10 @@
 package runtime
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestAuditLogDeepCopiesMutableFields(t *testing.T) {
 	args := map[string]any{
@@ -69,5 +73,44 @@ func TestAuditLogRejectsUnsupportedValuesWithoutChangingChain(t *testing.T) {
 	log.entries[0].ToolCallID = "tampered-call"
 	if log.Verify() {
 		t.Fatal("tool call id is not covered by the audit hash")
+	}
+}
+
+func TestConnectorAuditSerializationRejectsPrivateImplementationMaterial(t *testing.T) {
+	var entry AuditEntry
+	if err := json.Unmarshal([]byte(`{
+		"tenantId":"mock-corp-001","userId":"u_prod1","tool":"report_production_progress",
+		"toolVersion":"1.0.0","executionLocation":"desktop","deviceId":"device-m71",
+		"connector":{
+			"connectorId":"sql-orders","version":"1.0.0","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"adapter":"sqlserver","sourceProfileId":"erp-test","environment":"test","deviceId":"device-m71",
+			"resourceKind":"order","resourceId":"ORD-1001","resourceRelation":"operator","approvalVersion":"1.0.0",
+			"idempotencyKeyId":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"requestFingerprintId":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			"executionStatus":"succeeded","readBackStatus":"succeeded","durationMs":27,
+			"before":{"completionRate":45,"internal_cost":900,"credentialRef":"erp-test"},
+			"after":{"completionRate":60,"rawResponse":"SELECT * FROM dbo.production_orders"}
+		}
+	}`), &entry); err != nil {
+		t.Fatal(err)
+	}
+	log := NewAuditLog()
+	if err := log.Append(entry); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(log.Entries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, secret := range []string{"SELECT", "dbo.", "credentialRef", "internal_cost", "rawResponse"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("audit serialization leaked %q: %s", secret, text)
+		}
+	}
+	if !strings.Contains(text, `"connector":{"connectorId":"sql-orders"`) ||
+		!strings.Contains(text, `"idempotencyKeyId":"sha256:`) ||
+		!strings.Contains(text, `"requestFingerprintId":"sha256:`) {
+		t.Fatalf("audit serialization missing connector identifiers: %s", text)
 	}
 }

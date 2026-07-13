@@ -91,6 +91,7 @@ func toolSpec(version Version, contract ToolContract) connector.ToolSpec {
 	}
 	return connector.ToolSpec{
 		PackageID: version.ConnectorID, Version: version.Version, ManifestDigest: version.Digest,
+		Adapter: version.Adapter, Environment: version.Environment,
 		Name: contract.Name, Description: contract.Description, Params: params,
 		ResourceType: contract.ResourceType, ResourceKind: contract.ResourceKind, ResourceArg: contract.ResourceArg,
 		ResourceRelation: contract.ResourceRelation, DataDomain: contract.DataDomain,

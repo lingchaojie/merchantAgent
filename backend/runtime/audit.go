@@ -13,35 +13,65 @@ import (
 	"time"
 )
 
+var connectorAuditResultFields = map[string]struct{}{
+	"orderId": {}, "workOrderId": {}, "status": {}, "promiseDate": {},
+	"completionRate": {}, "note": {}, "version": {},
+}
+
+// ConnectorAudit is the public, non-sensitive execution record for a desktop
+// connector. Package and authorization identity are derived by the backend;
+// private source implementation details are intentionally absent.
+type ConnectorAudit struct {
+	ConnectorID          string         `json:"connectorId"`
+	Version              string         `json:"version"`
+	Digest               string         `json:"digest"`
+	Adapter              string         `json:"adapter"`
+	SourceProfileID      string         `json:"sourceProfileId,omitempty"`
+	Environment          string         `json:"environment"`
+	DeviceID             string         `json:"deviceId"`
+	ResourceKind         string         `json:"resourceKind"`
+	ResourceID           string         `json:"resourceId"`
+	ResourceRelation     string         `json:"resourceRelation"`
+	ApprovalVersion      string         `json:"approvalVersion"`
+	IdempotencyKeyID     string         `json:"idempotencyKeyId,omitempty"`
+	RequestFingerprintID string         `json:"requestFingerprintId"`
+	ExecutionStatus      string         `json:"executionStatus"`
+	ReadBackStatus       string         `json:"readBackStatus,omitempty"`
+	DurationMS           int64          `json:"durationMs"`
+	Before               map[string]any `json:"before,omitempty"`
+	After                map[string]any `json:"after,omitempty"`
+}
+
 // AuditEntry is one recorded agent action. Entries are hash-chained: each
 // entry's Hash covers the previous Hash, so any tampering breaks the chain.
 type AuditEntry struct {
-	Seq               int            `json:"seq"`
-	Time              time.Time      `json:"time"`
-	TenantID          string         `json:"tenantId"`
-	UserID            string         `json:"userId"`
-	Question          string         `json:"question"`
-	SkillID           string         `json:"skillId,omitempty"`
-	RoleIDs           []string       `json:"roleIds,omitempty"`
-	DeviceID          string         `json:"deviceId,omitempty"`
-	Tool              string         `json:"tool"`
-	ToolCallID        string         `json:"toolCallId,omitempty"`
-	ToolVersion       string         `json:"toolVersion,omitempty"`
-	ExecutionLocation string         `json:"executionLocation,omitempty"`
-	Risk              string         `json:"risk,omitempty"`
-	Args              map[string]any `json:"args"`
-	Decision          string         `json:"decision"` // "allow" | "deny"
-	Status            string         `json:"status,omitempty"`
-	Reason            string         `json:"reason"`
-	ExecutionID       string         `json:"executionId,omitempty"`
-	IdempotencyKey    string         `json:"idempotencyKey,omitempty"`
-	Confirmed         bool           `json:"confirmed"`
-	ConfirmedAt       string         `json:"confirmedAt,omitempty"`
-	ResourceID        string         `json:"resourceId,omitempty"`
-	Before            map[string]any `json:"before,omitempty"`
-	After             map[string]any `json:"after,omitempty"`
-	PrevHash          string         `json:"prevHash"`
-	Hash              string         `json:"hash"`
+	Seq               int             `json:"seq"`
+	Time              time.Time       `json:"time"`
+	TenantID          string          `json:"tenantId"`
+	UserID            string          `json:"userId"`
+	Question          string          `json:"question"`
+	SkillID           string          `json:"skillId,omitempty"`
+	RoleIDs           []string        `json:"roleIds,omitempty"`
+	DeviceID          string          `json:"deviceId,omitempty"`
+	Tool              string          `json:"tool"`
+	ToolCallID        string          `json:"toolCallId,omitempty"`
+	ToolVersion       string          `json:"toolVersion,omitempty"`
+	ExecutionLocation string          `json:"executionLocation,omitempty"`
+	Risk              string          `json:"risk,omitempty"`
+	Args              map[string]any  `json:"args"`
+	Decision          string          `json:"decision"` // "allow" | "deny"
+	Status            string          `json:"status,omitempty"`
+	Reason            string          `json:"reason"`
+	ExecutionID       string          `json:"executionId,omitempty"`
+	IdempotencyKey    string          `json:"idempotencyKey,omitempty"`
+	Confirmed         bool            `json:"confirmed"`
+	ConfirmedAt       string          `json:"confirmedAt,omitempty"`
+	ResourceID        string          `json:"resourceId,omitempty"`
+	Before            map[string]any  `json:"before,omitempty"`
+	After             map[string]any  `json:"after,omitempty"`
+	Connector         *ConnectorAudit `json:"connector,omitempty"`
+	PrevHash          string          `json:"prevHash"`
+	Hash              string          `json:"hash"`
 }
 
 // Appender records audit entries. *AuditLog (single chain) and *TenantAudit
@@ -92,6 +122,12 @@ func (a *AuditLog) Append(e AuditEntry) error {
 	if err != nil {
 		return fmt.Errorf("copy audit entry: %w", err)
 	}
+	if cloned.Connector != nil {
+		cloned.Connector.Before = filterConnectorAuditMap(cloned.Connector.Before, nil)
+		cloned.Connector.After = filterConnectorAuditMap(cloned.Connector.After, nil)
+		cloned.Before = filterConnectorAuditMap(cloned.Before, nil)
+		cloned.After = filterConnectorAuditMap(cloned.After, nil)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	cloned.Seq = len(a.entries) + 1
@@ -106,6 +142,31 @@ func (a *AuditLog) Append(e AuditEntry) error {
 	a.lastHash = cloned.Hash
 	a.entries = append(a.entries, cloned)
 	return nil
+}
+
+func filterConnectorAuditMap(values map[string]any, declared []string) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	allowed := connectorAuditResultFields
+	if len(declared) > 0 {
+		allowed = make(map[string]struct{}, len(declared))
+		for _, field := range declared {
+			if _, fixed := connectorAuditResultFields[field]; fixed {
+				allowed[field] = struct{}{}
+			}
+		}
+	}
+	filtered := make(map[string]any, len(allowed))
+	for key, value := range values {
+		if _, ok := allowed[key]; ok {
+			filtered[key] = value
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 // Entries returns a copy of the log.
