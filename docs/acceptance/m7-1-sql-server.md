@@ -661,6 +661,141 @@ function New-CleanupStage {
   )
   return [pscustomobject]@{ Name = $Name; Action = $Action }
 }
+# BEGIN EXTRACTABLE VERIFIED BACKUP PURGE
+function Assert-VerifiedStateBackup {
+  param(
+    [Parameter(Mandatory)] [string] $Root,
+    [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $ExpectedManifest,
+    [Parameter(Mandatory)] [string[]] $IsolationRelativePaths
+  )
+
+  $rootItem = Get-Item -Force -LiteralPath $Root -ErrorAction Stop
+  $rootFullPath = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  $actualRootFullPath = [IO.Path]::GetFullPath($rootItem.FullName).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  if (!$rootItem.PSIsContainer -or
+      ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+      ![string]::Equals($rootFullPath, $actualRootFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Quarantined backup is not the exact expected directory: $Root"
+  }
+
+  $manifestPath = Join-Path $rootFullPath 'manifest.json'
+  $filesRoot = Join-Path $rootFullPath 'files'
+  $rootEntries = @(Get-ChildItem -Force -LiteralPath $rootFullPath -ErrorAction Stop)
+  $unexpectedRootEntries = @($rootEntries | Where-Object { $_.Name -notin @('manifest.json', 'files') })
+  if ($rootEntries.Count -ne 2 -or $unexpectedRootEntries.Count -ne 0 -or
+      !(Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+      !(Test-Path -LiteralPath $filesRoot -PathType Container)) {
+    throw "Quarantined backup does not contain direct manifest.json and files entries only: $Root"
+  }
+  foreach ($entry in $rootEntries) {
+    if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Quarantined backup contains an unsupported direct reparse point: $($entry.FullName)"
+    }
+  }
+
+  $quarantinedManifest = @(
+    Get-Content -Raw -LiteralPath $manifestPath -ErrorAction Stop |
+      ConvertFrom-Json -ErrorAction Stop
+  )
+  $expectedManifestRows = @($ExpectedManifest | ForEach-Object { $_ | ConvertTo-Json -Compress })
+  $quarantinedManifestRows = @($quarantinedManifest | ForEach-Object { $_ | ConvertTo-Json -Compress })
+  if (@(Compare-Object -ReferenceObject $expectedManifestRows -DifferenceObject $quarantinedManifestRows).Count -ne 0) {
+    throw "Quarantined backup manifest differs from the verified restoration manifest: $manifestPath"
+  }
+
+  $expectedEntries = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $expectedFiles = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($state in $ExpectedManifest) {
+    $relativePath = ([string]$state.relativePath).Replace('\', '/')
+    if ($state.kind -ne 'file' -or $IsolationRelativePaths -notcontains $relativePath) { continue }
+    if ($expectedEntries.ContainsKey($relativePath)) {
+      throw "Duplicate expected quarantined backup path: $relativePath"
+    }
+    $expectedEntries.Add($relativePath, 'file')
+    $expectedFiles.Add($relativePath, $state)
+    $parent = [IO.Path]::GetDirectoryName($relativePath.Replace('/', '\'))
+    while (![string]::IsNullOrEmpty($parent)) {
+      $normalizedParent = $parent.Replace('\', '/')
+      if (!$expectedEntries.ContainsKey($normalizedParent)) {
+        $expectedEntries.Add($normalizedParent, 'directory')
+      }
+      $parent = [IO.Path]::GetDirectoryName($parent)
+    }
+  }
+
+  $filesRootPrefix = [IO.Path]::GetFullPath($filesRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  $actualEntries = @(Get-ChildItem -Force -Recurse -LiteralPath $filesRoot -ErrorAction Stop)
+  foreach ($entry in $actualEntries) {
+    if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Quarantined backup contains an unsupported reparse point: $($entry.FullName)"
+    }
+    $entryFullPath = [IO.Path]::GetFullPath($entry.FullName)
+    if (!$entryFullPath.StartsWith($filesRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+      throw "Quarantined backup entry escaped the exact files root: $($entry.FullName)"
+    }
+    $relativePath = $entryFullPath.Substring($filesRootPrefix.Length).Replace('\', '/')
+    $kind = if ($entry.PSIsContainer) { 'directory' } else { 'file' }
+    if (!$expectedEntries.ContainsKey($relativePath) -or $expectedEntries[$relativePath] -ne $kind) {
+      throw "Unexpected quarantined backup entry: $relativePath"
+    }
+  }
+  if ($actualEntries.Count -ne $expectedEntries.Count) {
+    throw "Quarantined backup entry set is incomplete under: $filesRoot"
+  }
+  foreach ($relativePath in $expectedFiles.Keys) {
+    $backupPath = Join-Path $filesRoot $relativePath
+    $expectedState = $expectedFiles[$relativePath]
+    if (!(Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+      throw "Expected quarantined backup file is missing: $relativePath"
+    }
+    $backupItem = Get-Item -Force -LiteralPath $backupPath -ErrorAction Stop
+    if ($backupItem.Length -ne [long]$expectedState.length -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $backupPath).Hash -ne [string]$expectedState.sha256) {
+      throw "Quarantined backup file differs from the verified manifest: $relativePath"
+    }
+  }
+}
+function Move-VerifiedStateBackupToQuarantine {
+  param(
+    [Parameter(Mandatory)] [string] $Source,
+    [Parameter(Mandatory)] [string] $Destination,
+    [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $ExpectedManifest,
+    [Parameter(Mandatory)] [string[]] $IsolationRelativePaths
+  )
+
+  $sourceFullPath = [IO.Path]::GetFullPath($Source).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  $destinationFullPath = [IO.Path]::GetFullPath($Destination).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  if (![string]::Equals([IO.Path]::GetPathRoot($sourceFullPath), [IO.Path]::GetPathRoot($destinationFullPath), [StringComparison]::OrdinalIgnoreCase)) {
+    throw "State backup quarantine must stay on the same volume: $Source -> $Destination"
+  }
+  $sourceItem = Get-Item -Force -LiteralPath $sourceFullPath -ErrorAction Stop
+  if (!$sourceItem.PSIsContainer -or ($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Complete restoration backup is not a regular directory: $Source"
+  }
+
+  [IO.Directory]::Move($sourceFullPath, $destinationFullPath)
+  if ([IO.Directory]::Exists($sourceFullPath)) {
+    throw "Atomic backup quarantine left the original directory in place: $Source"
+  }
+  Assert-VerifiedStateBackup `
+    -Root $destinationFullPath `
+    -ExpectedManifest $ExpectedManifest `
+    -IsolationRelativePaths $IsolationRelativePaths
+}
+function Remove-VerifiedStateBackupQuarantine {
+  param(
+    [Parameter(Mandatory)] [string] $Root,
+    [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $ExpectedManifest,
+    [Parameter(Mandatory)] [string[]] $IsolationRelativePaths
+  )
+
+  Assert-VerifiedStateBackup `
+    -Root $Root `
+    -ExpectedManifest $ExpectedManifest `
+    -IsolationRelativePaths $IsolationRelativePaths
+  Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction Stop
+}
+# END EXTRACTABLE VERIFIED BACKUP PURGE
 
 $SafeCleanupStages = @(
   New-CleanupStage -Name 'Load preflight state manifest' -Action {
@@ -941,20 +1076,18 @@ $FinalCleanupStages = @(
 )
 
 $QuarantineBackupStage = New-CleanupStage -Name 'Quarantine verified sensitive backup' -Action {
-  if (!(Test-Path -LiteralPath $StateBackup -PathType Container)) {
-    throw "Complete restoration backup is missing before quarantine: $StateBackup"
-  }
-  if (Test-Path -LiteralPath $StatePurge) {
-    throw "Post-restore purge path already exists: $StatePurge"
-  }
-  Move-Item -LiteralPath $StateBackup -Destination $StatePurge -ErrorAction Stop
-  if ((Test-Path -LiteralPath $StateBackup) -or !(Test-Path -LiteralPath $StatePurge -PathType Container)) {
-    throw "Atomic backup quarantine did not complete from $StateBackup to $StatePurge"
-  }
+  Move-VerifiedStateBackupToQuarantine `
+    -Source $StateBackup `
+    -Destination $StatePurge `
+    -ExpectedManifest $CleanupContext.PreflightManifest `
+    -IsolationRelativePaths $IsolationRelativePaths
   $CleanupContext.BackupQuarantined = $true
 }
 $PurgeBackupStage = New-CleanupStage -Name 'Delete quarantined sensitive backup' -Action {
-  Remove-Item -LiteralPath $StatePurge -Recurse -Force -ErrorAction Stop
+  Remove-VerifiedStateBackupQuarantine `
+    -Root $StatePurge `
+    -ExpectedManifest $CleanupContext.PreflightManifest `
+    -IsolationRelativePaths $IsolationRelativePaths
 }
 $BackupAbsenceStage = New-CleanupStage -Name 'Verify restoration backup and purge path absent' -Action {
   $remainingBackupPaths = @(@($StateBackup, $StatePurge) | Where-Object { Test-Path -LiteralPath $_ })
@@ -1015,10 +1148,14 @@ fixture TLS, backend data, temporary directory, and each userData file. An
 original userData file is present only after its recorded SHA-256 and ACL SDDL
 match; a path that did not exist before acceptance remains absent. Every cleanup
 and verification stage records its own failure and allows later stages to run.
-Any pre-purge error leaves the complete original backup untouched. A purge
-failure reports the exact tracked quarantine path and never claims that the
-original backup was retained; unexpected unrelated state is reported and
-preserved.
+Any pre-purge error leaves the complete original backup untouched. Quarantine
+uses a same-volume destination-must-not-exist directory rename, then proves that
+the exact purge root directly contains only the expected manifest and hashed
+backup-file tree; it repeats that proof immediately before recursive deletion.
+A destination collision or mismatched purge tree blocks PASS and preserves both
+paths. A purge failure reports the exact tracked quarantine path and never
+claims that the original backup was retained; unexpected unrelated state is
+reported and preserved.
 
 ## Evidence Table
 

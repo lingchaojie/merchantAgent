@@ -20,6 +20,9 @@ const cleanupBlock = powershellBlocks.find((block) => block.includes("Final clea
 const cleanupOrchestration = cleanupBlock.match(
   /# BEGIN EXTRACTABLE CLEANUP ORCHESTRATION\r?\n([\s\S]*?)# END EXTRACTABLE CLEANUP ORCHESTRATION/,
 )?.[1] ?? "";
+const verifiedBackupPurge = cleanupBlock.match(
+  /# BEGIN EXTRACTABLE VERIFIED BACKUP PURGE\r?\n([\s\S]*?)# END EXTRACTABLE VERIFIED BACKUP PURGE/,
+)?.[1] ?? "";
 
 function stageNamesBetween(start: string, end: string): string[] {
   const startIndex = cleanupBlock.indexOf(start);
@@ -38,13 +41,22 @@ function powerShellStringArray(values: readonly string[]): string {
 
 function runPowerShell(script: string) {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
-  let result = spawnSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+  const usesStdin = encoded.length > 24_000;
+  const args = usesStdin
+    ? [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$source = [Console]::In.ReadToEnd(); Invoke-Expression $source",
+      ]
+    : ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded];
+  const options = {
     encoding: "utf8",
-  });
+    input: usesStdin ? script : undefined,
+  } as const;
+  let result = spawnSync("pwsh.exe", args, options);
   if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-    result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
-      encoding: "utf8",
-    });
+    result = spawnSync("powershell.exe", args, options);
   }
   expect(result.error).toBeUndefined();
   const progressOnly = result.stderr.startsWith("#< CLIXML")
@@ -161,6 +173,138 @@ ConvertTo-Json -Compress -Depth 8 -InputObject @($results)
 `;
   cachedSyntheticCleanupScenarios = runPowerShell(script) as SyntheticCleanupResult[];
   return cachedSyntheticCleanupScenarios;
+}
+
+type BackupPurgeScenario = {
+  scenario: "collision" | "success";
+  attempted: string[];
+  errors: string[];
+  passed: boolean;
+  backupQuarantined: boolean;
+  backupPurgeVerified: boolean;
+  originalBackupPresent: boolean;
+  originalBackupComplete: boolean;
+  purgePathPresent: boolean;
+  sentinelPresent: boolean;
+  sentinelContent: string | null;
+};
+
+function runBackupPurgeScenarios(): BackupPurgeScenario[] {
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+${cleanupOrchestration}
+${verifiedBackupPurge}
+function New-TestStage {
+  param([Parameter(Mandatory)] [string] $Name, [Parameter(Mandatory)] [scriptblock] $Action)
+  return [pscustomobject]@{ Name = $Name; Action = $Action }
+}
+function New-TestBackup {
+  param([Parameter(Mandatory)] [string] $Root)
+  $filesRoot = Join-Path $Root 'files'
+  $payloadPath = Join-Path $filesRoot 'device-identity.json'
+  [IO.Directory]::CreateDirectory($filesRoot) | Out-Null
+  [IO.File]::WriteAllText($payloadPath, 'sensitive-original', [Text.UTF8Encoding]::new($false))
+  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadPath).Hash
+  $manifest = @([pscustomobject]@{
+    relativePath = 'device-identity.json'
+    kind = 'file'
+    length = (Get-Item -LiteralPath $payloadPath).Length
+    sha256 = $hash
+    sddl = 'test-sddl'
+  })
+  $manifestJson = ConvertTo-Json -InputObject @($manifest) -Depth 4
+  [IO.File]::WriteAllText((Join-Path $Root 'manifest.json'), $manifestJson, [Text.UTF8Encoding]::new($false))
+  return $manifest
+}
+function Invoke-BackupPurgeScenario {
+  param([Parameter(Mandatory)] [bool] $Collision)
+  $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("merchantAgent-purge-test-" + [guid]::NewGuid().ToString('N'))
+  $stateBackup = Join-Path $testRoot 'state-backup'
+  $statePurge = Join-Path $testRoot 'state-backup.purge'
+  $sentinelPath = Join-Path $statePurge 'unrelated-sentinel.txt'
+  [IO.Directory]::CreateDirectory($testRoot) | Out-Null
+  try {
+    $expectedManifest = @(New-TestBackup -Root $stateBackup)
+    if ($Collision) {
+      [IO.Directory]::CreateDirectory($statePurge) | Out-Null
+      [IO.File]::WriteAllText($sentinelPath, 'unrelated-do-not-delete', [Text.UTF8Encoding]::new($false))
+    }
+    $context = [ordered]@{
+      RestorationVerified = $false
+      FinalChecksCompleted = $false
+      BackupQuarantined = $false
+      BackupPurgeVerified = $false
+    }
+    $errors = [Collections.Generic.List[string]]::new()
+    $safeStages = @(New-TestStage -Name 'safe-noop' -Action {})
+    $finalAction = { $context.RestorationVerified = $true }.GetNewClosure()
+    $finalStages = @(New-TestStage -Name 'verify-restoration' -Action $finalAction)
+    $quarantineAction = {
+      $moveParameters = @{
+        Source = $stateBackup
+        Destination = $statePurge
+        ExpectedManifest = $expectedManifest
+        IsolationRelativePaths = @('device-identity.json')
+      }
+      Move-VerifiedStateBackupToQuarantine @moveParameters
+      $context.BackupQuarantined = $true
+    }.GetNewClosure()
+    $purgeAction = {
+      $purgeParameters = @{
+        Root = $statePurge
+        ExpectedManifest = $expectedManifest
+        IsolationRelativePaths = @('device-identity.json')
+      }
+      Remove-VerifiedStateBackupQuarantine @purgeParameters
+    }.GetNewClosure()
+    $absenceAction = {
+      if ((Test-Path -LiteralPath $stateBackup) -or (Test-Path -LiteralPath $statePurge)) {
+        throw 'backup or purge path remains'
+      }
+      $context.BackupPurgeVerified = $true
+    }.GetNewClosure()
+    $orchestrationParameters = @{
+      Context = $context
+      Errors = $errors
+      SafeStages = $safeStages
+      FinalStages = $finalStages
+      QuarantineStage = New-TestStage -Name 'quarantine-backup' -Action $quarantineAction
+      PurgeStage = New-TestStage -Name 'purge-backup' -Action $purgeAction
+      BackupAbsenceStage = New-TestStage -Name 'verify-backup-paths-absent' -Action $absenceAction
+    }
+    $result = Invoke-CleanupOrchestration @orchestrationParameters
+    $originalPayload = Join-Path $stateBackup 'files\device-identity.json'
+    $originalManifest = Join-Path $stateBackup 'manifest.json'
+    return [pscustomobject]@{
+      scenario = if ($Collision) { 'collision' } else { 'success' }
+      attempted = @($result.Attempted)
+      errors = @($result.Errors)
+      passed = $result.Passed
+      backupQuarantined = $context.BackupQuarantined
+      backupPurgeVerified = $context.BackupPurgeVerified
+      originalBackupPresent = Test-Path -LiteralPath $stateBackup -PathType Container
+      originalBackupComplete = (Test-Path -LiteralPath $originalManifest -PathType Leaf) -and
+        (Test-Path -LiteralPath $originalPayload -PathType Leaf) -and
+        ((Get-FileHash -Algorithm SHA256 -LiteralPath $originalPayload).Hash -eq $expectedManifest[0].sha256)
+      purgePathPresent = Test-Path -LiteralPath $statePurge -PathType Container
+      sentinelPresent = Test-Path -LiteralPath $sentinelPath -PathType Leaf
+      sentinelContent = if (Test-Path -LiteralPath $sentinelPath -PathType Leaf) {
+        [IO.File]::ReadAllText($sentinelPath)
+      } else { $null }
+    }
+  } finally {
+    if (Test-Path -LiteralPath $testRoot) {
+      Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop
+    }
+  }
+}
+$results = @(
+  Invoke-BackupPurgeScenario -Collision $true
+  Invoke-BackupPurgeScenario -Collision $false
+)
+ConvertTo-Json -Compress -Depth 8 -InputObject @($results)
+`;
+  return runPowerShell(script) as BackupPurgeScenario[];
 }
 
 describe("M7.1 Windows acceptance runbook", () => {
@@ -341,9 +485,45 @@ describe("M7.1 Windows acceptance runbook", () => {
     expect(success?.passed).toBe(true);
   });
 
+  it.skipIf(process.platform !== "win32")("exclusively quarantines the exact backup before deleting it", () => {
+    const results = runBackupPurgeScenarios();
+    const collision = results.find((result) => result.scenario === "collision");
+    expect(collision?.attempted.slice(-2)).toEqual([
+      "quarantine-backup",
+      "verify-backup-paths-absent",
+    ]);
+    expect(collision?.attempted).not.toContain("purge-backup");
+    expect(collision?.errors).toHaveLength(2);
+    expect(collision?.errors[0]).toContain("[quarantine-backup]");
+    expect(collision?.passed).toBe(false);
+    expect(collision?.backupQuarantined).toBe(false);
+    expect(collision?.backupPurgeVerified).toBe(false);
+    expect(collision?.originalBackupPresent).toBe(true);
+    expect(collision?.originalBackupComplete).toBe(true);
+    expect(collision?.purgePathPresent).toBe(true);
+    expect(collision?.sentinelPresent).toBe(true);
+    expect(collision?.sentinelContent).toBe("unrelated-do-not-delete");
+
+    const success = results.find((result) => result.scenario === "success");
+    expect(success?.attempted.slice(-3)).toEqual([
+      "quarantine-backup",
+      "purge-backup",
+      "verify-backup-paths-absent",
+    ]);
+    expect(success?.errors).toEqual([]);
+    expect(success?.passed).toBe(true);
+    expect(success?.backupQuarantined).toBe(true);
+    expect(success?.backupPurgeVerified).toBe(true);
+    expect(success?.originalBackupPresent).toBe(false);
+    expect(success?.purgePathPresent).toBe(false);
+  });
+
   it("reports restoration backups separately from post-restore purge remnants and gates the sole PASS marker", () => {
     expect(runbook.match(/Final cleanup verification passed/g)).toHaveLength(1);
-    expect(cleanupBlock).toContain("Move-Item -LiteralPath $StateBackup -Destination $StatePurge -ErrorAction Stop");
+    expect(verifiedBackupPurge).toContain("[IO.Directory]::Move($sourceFullPath, $destinationFullPath)");
+    expect(verifiedBackupPurge).not.toContain("Test-Path -LiteralPath $Destination");
+    expect(verifiedBackupPurge).toMatch(/function Remove-VerifiedStateBackupQuarantine[\s\S]*?Assert-VerifiedStateBackup[\s\S]*?Remove-Item -LiteralPath \$Root -Recurse/);
+    expect(cleanupBlock).not.toContain("Move-Item -LiteralPath $StateBackup");
     expect(cleanupBlock).toContain("post-restore purge remnants remain at:");
     expect(cleanupBlock).toContain("The original restoration backup remains untouched at:");
     expect(cleanupBlock).not.toContain("The sensitive preflight backup was retained at:");
