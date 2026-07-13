@@ -267,6 +267,22 @@ describe("ConnectorRuntime Gate C", () => {
     expect(f.credentialGet).not.toHaveBeenCalled();
   });
 
+  it("rejects a loaded profile and credential alias before metadata, credentials, or source access", async () => {
+    const f = fixture();
+    const connector = loaded();
+    const credentialRef = connector.payload.profile.credentialRef;
+    connector.payload.profile.profileId = credentialRef;
+    f.loadApproved.mockReturnValue(connector);
+
+    const result = await f.runtime.execute(request(), async () => true);
+
+    expect(result.error).toBe("invalid_argument");
+    expect(f.credentialGet).not.toHaveBeenCalled();
+    expect(f.dependencies.createSource).not.toHaveBeenCalled();
+    expect(result.meta).not.toHaveProperty("sourceProfileId");
+    expect(JSON.stringify(result)).not.toContain(credentialRef);
+  });
+
   it("denies when private SQL projections exceed the approved public result fields", async () => {
     const f = fixture();
     f.loadApproved.mockReturnValue({

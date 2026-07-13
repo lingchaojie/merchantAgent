@@ -39,10 +39,65 @@ shared issue, chat, backend log, or audit record.
 - A test-only LLM key if the visible chat flow uses the live provider.
 
 ```powershell
+$ErrorActionPreference = 'Stop'
 $Repo = 'D:\merchantAgent\.worktrees\desktop-local-tools'
 $Acceptance = Join-Path $env:LOCALAPPDATA 'merchantAgent-m7-acceptance'
 New-Item -ItemType Directory -Force $Acceptance | Out-Null
 git -C $Repo rev-parse HEAD
+
+$AgentdStopScript = @'
+set -euo pipefail
+agentd_pids() {
+  {
+    pgrep -f '[g]o run ./cmd/agentd' || :
+    pgrep -f '[/]tmp/go-build.*/exe/agentd' || :
+    ss -H -ltnp 'sport = :8765' 2>/dev/null | grep -o 'pid=[0-9]\+' | cut -d= -f2 || :
+  } | sort -u
+}
+pids="$(agentd_pids)"
+if [ -n "$pids" ]; then
+  while read -r pid; do kill -TERM "$pid" 2>/dev/null || :; done <<<"$pids"
+fi
+for _ in $(seq 1 50); do
+  [ -z "$(agentd_pids)" ] && break
+  sleep 0.2
+done
+pids="$(agentd_pids)"
+if [ -n "$pids" ]; then
+  while read -r pid; do kill -KILL "$pid" 2>/dev/null || :; done <<<"$pids"
+  sleep 0.2
+fi
+if pgrep -f '[g]o run ./cmd/agentd' >/dev/null ||
+   pgrep -f '[/]tmp/go-build.*/exe/agentd' >/dev/null ||
+   ss -H -ltnp 'sport = :8765' 2>/dev/null | grep -q .; then
+  echo 'agentd still owns backend port 8765 or an agentd process remains' >&2
+  exit 1
+fi
+'@
+function Invoke-WSLBashScript {
+  param(
+    [Parameter(Mandatory)] [string] $Script,
+    [Parameter(Mandatory)] [string] $FailureMessage
+  )
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script))
+  wsl.exe -e bash -lc "printf '%s' '$encoded' | base64 -d | bash"
+  if ($LASTEXITCODE -ne 0) { throw $FailureMessage }
+}
+function Stop-AcceptanceProcesses {
+  $appPids = @(Get-Process -Name merchantAgent -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+  if ($appPids.Count -gt 0) {
+    Stop-Process -Id $appPids -Force -ErrorAction Stop
+  }
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  while ((Get-Process -Name merchantAgent -ErrorAction SilentlyContinue) -and
+         [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 200
+  }
+  if (Get-Process -Name merchantAgent -ErrorAction SilentlyContinue) {
+    throw 'Packaged merchantAgent processes are still running.'
+  }
+  Invoke-WSLBashScript -Script $AgentdStopScript -FailureMessage 'Could not stop and verify agentd.'
+}
 ```
 
 ## 1. Automated Baseline
@@ -107,8 +162,7 @@ $StatePaths = [ordered]@{
   executionLedgerShm = "${LedgerPath}-shm"
 }
 
-Get-Process merchantAgent -ErrorAction SilentlyContinue | Stop-Process -Force
-wsl.exe -e bash -lc 'pkill -TERM -f "[c]md/agentd" 2>/dev/null || true'
+Stop-AcceptanceProcesses
 if (Test-Path -LiteralPath $StateBackup) {
   throw "Stale state backup exists; restore or securely remove it before acceptance: $StateBackup"
 }
@@ -130,7 +184,9 @@ $StateManifest = foreach ($entry in $StatePaths.GetEnumerator()) {
 }
 $StateManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StateManifestPath -Encoding utf8NoBOM
 foreach ($state in $StateManifest) {
-  Remove-Item -LiteralPath $state.path -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $state.path -PathType Leaf) {
+    Remove-Item -LiteralPath $state.path -Force -ErrorAction Stop
+  }
   if (Test-Path -LiteralPath $state.path) { throw "Could not isolate $($state.name): $($state.path)" }
 }
 ```
@@ -176,12 +232,23 @@ Open Connector Workbench, record the device ID/fingerprint, then close the app.
 Export only the public device key:
 
 ```powershell
-$Identity = Get-Content -Raw $IdentityPath | ConvertFrom-Json
+$IdentityRaw = Get-Content -Raw -LiteralPath $IdentityPath -ErrorAction Stop
+$Identity = $IdentityRaw | ConvertFrom-Json -ErrorAction Stop
+if ([string]::IsNullOrWhiteSpace($Identity.encryptedPrivateKey)) {
+  throw 'DPAPI identity has no encryptedPrivateKey.'
+}
+try {
+  [Convert]::FromBase64String($Identity.encryptedPrivateKey) | Out-Null
+} catch {
+  throw 'DPAPI encryptedPrivateKey is not valid base64.'
+}
+if ($IdentityRaw -match '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----') {
+  throw 'DPAPI identity contains a plaintext private-key marker.'
+}
 [IO.File]::WriteAllText((Join-Path $Acceptance 'device-public.pem'), $Identity.devicePublicKeyPem)
 $Identity.deviceId | Set-Content -LiteralPath (Join-Path $Acceptance 'acceptance-device-id.txt') -Encoding ascii
 $Identity.deviceId
 icacls.exe $IdentityPath
-Select-String -Path $IdentityPath -Pattern 'encryptedPrivateKey','BEGIN PRIVATE KEY'
 ```
 
 Require `encryptedPrivateKey`, no plaintext private key, and a target-user-only
@@ -280,11 +347,12 @@ files, connector registry, and audit JSON.
 
 ## 9. Cleanup
 
-First close all packaged app windows and stop WSL terminal 1. Run the following
-even when any earlier acceptance step fails. It deletes the exact acceptance
+Run the following even when any earlier acceptance step fails; it force-stops
+every packaged-app process and both the `go run` parent and listening agentd
+child before touching state. It deletes the exact acceptance
 Credential Manager target, acceptance package, DPAPI device identity, installed
 connector envelope, and execution ledger; restores every preflight file with
-its original bytes and ACL; and tears down backend/SQL material:
+its original bytes and ACL; and tears down backend/OpenFGA and SQL material:
 
 ```powershell
 $AcceptanceDeviceIdPath = Join-Path $Acceptance 'acceptance-device-id.txt'
@@ -302,30 +370,73 @@ if (!(Test-Path -LiteralPath $StateManifestPath -PathType Leaf)) {
   throw "Preflight state manifest is missing: $StateManifestPath"
 }
 $StateManifest = @(Get-Content -Raw -LiteralPath $StateManifestPath | ConvertFrom-Json)
+$AcceptancePackage = Join-Path $Repo 'desktop\dist\win-unpacked'
+$AcceptanceArtifacts = @(
+  (Join-Path $Acceptance 'implementation-credential.txt'),
+  (Join-Path $Acceptance 'platform-private.pem'),
+  (Join-Path $Acceptance 'platform-public.pem'),
+  (Join-Path $Acceptance 'device-public.pem'),
+  $AcceptanceDeviceIdPath
+)
 
-Get-Process merchantAgent -ErrorAction SilentlyContinue | Stop-Process -Force
-wsl.exe -e bash -lc 'pkill -TERM -f "[c]md/agentd" 2>/dev/null || true'
+Stop-AcceptanceProcesses
 if ($CredentialTarget) {
-  cmdkey.exe /delete:$CredentialTarget
+  $CredentialListing = cmdkey.exe /list:$CredentialTarget 2>&1 | Out-String
+  if ($CredentialListing -match [regex]::Escape($CredentialTarget)) {
+    cmdkey.exe /delete:$CredentialTarget
+    if ($LASTEXITCODE -ne 0) { throw "Credential Manager deletion failed: $CredentialTarget" }
+  }
   $CredentialListing = cmdkey.exe /list:$CredentialTarget 2>&1 | Out-String
   if ($CredentialListing -match [regex]::Escape($CredentialTarget)) {
     throw "Credential Manager target still exists: $CredentialTarget"
   }
 }
-Remove-Item "$Repo\desktop\dist\win-unpacked" -Recurse -Force -ErrorAction SilentlyContinue
-wsl.exe -e bash -lc 'rm -rf "$HOME/.local/share/merchantagent-m7"; cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver && docker compose down -v --remove-orphans && rm -rf tls'
+if (Test-Path -LiteralPath $AcceptancePackage) {
+  Remove-Item -LiteralPath $AcceptancePackage -Recurse -Force -ErrorAction Stop
+}
+if (Test-Path -LiteralPath $AcceptancePackage) {
+  throw "Acceptance package remains: $AcceptancePackage"
+}
+
+$ResourceCleanup = @'
+set -euo pipefail
+cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/backend && docker compose down -v --remove-orphans
+cd /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver && docker compose down -v --remove-orphans
+rm -rf -- "$HOME/.local/share/merchantagent-m7"
+rm -rf -- /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver/tls
+backend_containers="$(docker ps -aq --filter label=com.docker.compose.project=backend)"
+backend_networks="$(docker network ls -q --filter label=com.docker.compose.project=backend)"
+sql_containers="$(docker ps -aq --filter label=com.docker.compose.project=sqlserver)"
+sql_networks="$(docker network ls -q --filter label=com.docker.compose.project=sqlserver)"
+if [ -n "$backend_containers$backend_networks" ]; then
+  echo 'Acceptance Compose resource remains: backend' >&2
+  exit 1
+fi
+if [ -n "$sql_containers$sql_networks" ]; then
+  echo 'Acceptance Compose resource remains: sqlserver' >&2
+  exit 1
+fi
+test ! -e "$HOME/.local/share/merchantagent-m7"
+test ! -e /mnt/d/merchantAgent/.worktrees/desktop-local-tools/test/sqlserver/tls
+'@
+Invoke-WSLBashScript -Script $ResourceCleanup -FailureMessage 'Backend/OpenFGA or SQL resource cleanup failed.'
 
 foreach ($state in $StateManifest) {
-  Remove-Item -LiteralPath $state.path -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $state.path -PathType Leaf) {
+    Remove-Item -LiteralPath $state.path -Force -ErrorAction Stop
+  }
+  if (Test-Path -LiteralPath $state.path) {
+    throw "Acceptance userData state remains: $($state.path)"
+  }
   if ($state.existed) {
     if (!(Test-Path -LiteralPath $state.backupPath -PathType Leaf)) {
       throw "Backup is missing for $($state.name): $($state.backupPath)"
     }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $state.path) | Out-Null
-    Copy-Item -LiteralPath $state.backupPath -Destination $state.path
+    Copy-Item -LiteralPath $state.backupPath -Destination $state.path -ErrorAction Stop
     $acl = Get-Acl -LiteralPath $state.path
     $acl.SetSecurityDescriptorSddlForm($state.sddl)
-    Set-Acl -LiteralPath $state.path -AclObject $acl
+    Set-Acl -LiteralPath $state.path -AclObject $acl -ErrorAction Stop
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $state.path).Hash -ne $state.sha256) {
       throw "Restored bytes differ for $($state.name): $($state.path)"
     }
@@ -339,27 +450,63 @@ foreach ($state in $StateManifest) {
 $InstalledPackageDirectory = Join-Path $ConnectorState 'sql-orders'
 if ((Test-Path -LiteralPath $InstalledPackageDirectory) -and
     (Get-ChildItem -Force -LiteralPath $InstalledPackageDirectory | Measure-Object).Count -eq 0) {
-  Remove-Item -LiteralPath $InstalledPackageDirectory -Force
+  Remove-Item -LiteralPath $InstalledPackageDirectory -Force -ErrorAction Stop
 }
-Remove-Item "$Acceptance\implementation-credential.txt","$Acceptance\platform-private.pem","$Acceptance\platform-public.pem","$Acceptance\device-public.pem","$Acceptance\acceptance-device-id.txt" -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $StateBackup -Recurse -Force
+foreach ($artifact in $AcceptanceArtifacts) {
+  if (Test-Path -LiteralPath $artifact) {
+    Remove-Item -LiteralPath $artifact -Force -ErrorAction Stop
+  }
+  if (Test-Path -LiteralPath $artifact) {
+    throw "Acceptance artifact remains: $artifact"
+  }
+}
+foreach ($state in $StateManifest) {
+  if ($state.existed) {
+    if (!(Test-Path -LiteralPath $state.path -PathType Leaf)) {
+      throw "Restored state is missing for $($state.name): $($state.path)"
+    }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $state.path).Hash -ne $state.sha256) {
+      throw "Final restored bytes differ for $($state.name): $($state.path)"
+    }
+    if ((Get-Acl -LiteralPath $state.path).Sddl -ne $state.sddl) {
+      throw "Final restored ACL differs for $($state.name): $($state.path)"
+    }
+  } elseif (Test-Path -LiteralPath $state.path) {
+    throw "Acceptance userData state remains: $($state.path)"
+  }
+}
+Remove-Item -LiteralPath $StateBackup -Recurse -Force -ErrorAction Stop
+if (Test-Path -LiteralPath $StateBackup) {
+  throw "Sensitive state backup remains: $StateBackup"
+}
+if ((Test-Path -LiteralPath $Acceptance) -and
+    (Get-ChildItem -Force -LiteralPath $Acceptance | Measure-Object).Count -gt 0) {
+  throw "Acceptance temp artifact remains under: $Acceptance"
+}
+if (Test-Path -LiteralPath $Acceptance) {
+  Remove-Item -LiteralPath $Acceptance -Force -ErrorAction Stop
+}
+if (Test-Path -LiteralPath $Acceptance) {
+  throw "Acceptance temp directory remains: $Acceptance"
+}
+if (!$CredentialTarget) {
+  throw 'Cannot verify the exact Credential Manager target without the acceptance device ID.'
+}
+$ScopedGitStatus = git -C $Repo status --short -- desktop/resources/implementation/platform-public.pem test/sqlserver
+if ($LASTEXITCODE -ne 0 -or $ScopedGitStatus) {
+  throw "Acceptance changed tracked platform-key or SQL-fixture files: $ScopedGitStatus"
+}
+Stop-AcceptanceProcesses
+Write-Host 'Final cleanup verification passed'
 ```
 
-Do not rebuild with the acceptance key. Confirm cleanup with scoped checks so
-unrelated worktree changes do not obscure the result:
-
-```powershell
-git -C $Repo status --short -- desktop/resources/implementation/platform-public.pem test/sqlserver
-Test-Path "$Repo\desktop\dist\win-unpacked"
-if ($CredentialTarget) { cmdkey.exe /list:$CredentialTarget }
-$StateManifest | Select-Object name,existed,path
-Test-Path -LiteralPath $StateBackup
-```
-
-Expected: scoped Git status is empty, `Test-Path` is `False`, and the exact
-credential target is absent. The state manifest transcript must show each
-scoped path and whether an original file was restored; its recorded hash and ACL
-checks must have completed without error. The state-backup path must be absent.
+Do not rebuild with the acceptance key. The cleanup block is successful only if
+it prints `Final cleanup verification passed`. Before that line it rechecks the
+exact Credential Manager target, packaged processes and backend port, both
+Compose projects' containers and networks, the acceptance package and key files,
+fixture TLS, backend data, temporary directory, and each userData file. An
+original userData file is present only after its recorded SHA-256 and ACL SDDL
+match; a path that did not exist before acceptance remains absent.
 
 ## Evidence Table
 

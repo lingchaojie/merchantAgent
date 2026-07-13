@@ -16,6 +16,7 @@ import {
   type SQLUpdateOperation,
 } from "./schema";
 import type { ResumedUpdate, UpdatePreview } from "./sql-adapter";
+import { validateSQLServerProfile } from "./source-profile";
 import {
   validateOperationBeforeExecution,
   readOperationUsesResourceParameter,
@@ -238,6 +239,7 @@ export class ConnectorRuntime {
         approval.digest,
         request.tenantId,
       );
+      validateSQLServerProfile(connector.payload.profile);
       executionFacts = {
         sourceProfileId: connector.payload.profile.profileId,
         environment: connector.manifest.environment,
