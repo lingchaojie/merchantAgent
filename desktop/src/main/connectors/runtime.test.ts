@@ -283,6 +283,39 @@ describe("ConnectorRuntime Gate C", () => {
     expect(JSON.stringify(result)).not.toContain(credentialRef);
   });
 
+  it.each([
+    ["colon", "erp:test"],
+    ["129 characters", `A${"b".repeat(128)}`],
+  ])("rejects a loaded profile ID containing %s before execution metadata or private access", async (_name, profileId) => {
+    const f = fixture();
+    const connector = loaded();
+    connector.payload.profile.profileId = profileId;
+    f.loadApproved.mockReturnValue(connector);
+
+    const result = await f.runtime.execute(request(), async () => true);
+
+    expect(result.error).toBe("invalid_argument");
+    expect(result.meta).not.toHaveProperty("sourceProfileId");
+    expect(f.credentialGet).not.toHaveBeenCalled();
+    expect(f.dependencies.createSource).not.toHaveBeenCalled();
+    expect(f.source.executeRead).not.toHaveBeenCalled();
+  });
+
+  it("executes a loaded profile at the valid 128-character profile ID boundary", async () => {
+    const f = fixture();
+    const connector = loaded();
+    connector.payload.profile.profileId = `A${"b".repeat(127)}`;
+    f.loadApproved.mockReturnValue(connector);
+
+    const result = await f.runtime.execute(request(), async () => true);
+
+    expect(result.error).toBeUndefined();
+    expect(result.meta.sourceProfileId).toBe(connector.payload.profile.profileId);
+    expect(f.credentialGet).toHaveBeenCalledOnce();
+    expect(f.dependencies.createSource).toHaveBeenCalledOnce();
+    expect(f.source.executeRead).toHaveBeenCalledOnce();
+  });
+
   it("denies when private SQL projections exceed the approved public result fields", async () => {
     const f = fixture();
     f.loadApproved.mockReturnValue({

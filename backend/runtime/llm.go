@@ -664,12 +664,22 @@ func publicAuditIdentifier(value string) bool {
 	if value == "" || len(value) > 128 {
 		return false
 	}
-	for _, r := range value {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+	if !asciiAlphaNumeric(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if !(asciiAlphaNumeric(character) || character == '.' || character == '_' || character == '-') {
 			return false
 		}
 	}
 	return true
+}
+
+func asciiAlphaNumeric(character byte) bool {
+	return character >= 'a' && character <= 'z' ||
+		character >= 'A' && character <= 'Z' ||
+		character >= '0' && character <= '9'
 }
 
 func filterResult(data map[string]any, fields []string, enforceAllowlist bool) map[string]any {

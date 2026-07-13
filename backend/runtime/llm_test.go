@@ -593,6 +593,31 @@ func TestLLM_DynamicConnectorAuditUsesRegistryDevice(t *testing.T) {
 	}
 }
 
+func TestPublicAuditIdentifierGrammar(t *testing.T) {
+	valid := []string{
+		"A",
+		"A" + strings.Repeat("b", 127),
+		"profile.with_accepted-punctuation",
+	}
+	for _, value := range valid {
+		if !publicAuditIdentifier(value) {
+			t.Errorf("publicAuditIdentifier(%q) = false, want true", value)
+		}
+	}
+
+	invalid := []string{
+		"",
+		".leading-punctuation",
+		"erp:test",
+		"A" + strings.Repeat("b", 128),
+	}
+	for _, value := range invalid {
+		if publicAuditIdentifier(value) {
+			t.Errorf("publicAuditIdentifier(%q) = true, want false", value)
+		}
+	}
+}
+
 func TestLLM_LocalExecutionAuditTerminalStates(t *testing.T) {
 	cases := []struct {
 		name         string

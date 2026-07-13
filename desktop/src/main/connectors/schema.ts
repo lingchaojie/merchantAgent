@@ -198,6 +198,7 @@ export class ConnectorError extends Error {
 }
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const SOURCE_PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CREDENTIAL_REF = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const PACKAGE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -207,6 +208,10 @@ const PROTOTYPE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 export function isCredentialRef(value: unknown): value is string {
   return typeof value === "string" && CREDENTIAL_REF.test(value);
+}
+
+export function isSourceProfileId(value: unknown): value is string {
+  return typeof value === "string" && SOURCE_PROFILE_ID.test(value);
 }
 
 function fail(path: string, detail: string): never {
@@ -232,6 +237,11 @@ function string(value: unknown, path: string): string {
 
 function credentialRef(value: unknown, path: string): string {
   if (!isCredentialRef(value)) return fail(path, "must be an opaque credential ref");
+  return value;
+}
+
+function sourceProfileId(value: unknown, path: string): string {
+  if (!isSourceProfileId(value)) return fail(path, "must be a public source profile ID");
   return value;
 }
 
@@ -384,7 +394,7 @@ function parseProfile(value: unknown, path: string): SQLServerProfile {
     "connectTimeoutMS", "queryTimeoutMS", "credentialRef", "environment",
   ]);
   if (raw.encrypt !== true || raw.trustServerCertificate !== false) fail(path, "must require verified TLS");
-  const profileId = identifier(raw.profileId, `${path}.profileId`);
+  const profileId = sourceProfileId(raw.profileId, `${path}.profileId`);
   const parsedCredentialRef = credentialRef(raw.credentialRef, `${path}.credentialRef`);
   if (profileId === parsedCredentialRef) {
     fail(`${path}.credentialRef`, "must be distinct from profileId");

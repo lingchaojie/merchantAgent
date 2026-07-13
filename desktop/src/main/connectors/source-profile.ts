@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ServiceCredential } from "./credential-vault";
-import { ConnectorError, isCredentialRef, type SQLServerProfile } from "./schema";
+import { ConnectorError, isCredentialRef, isSourceProfileId, type SQLServerProfile } from "./schema";
 
 const MAX_CA_BYTES = 256 * 1024;
 const CERTIFICATE_EXTENSIONS = new Set([".pem", ".crt", ".cer"]);
@@ -110,7 +110,7 @@ export function validateSQLServerProfile(profile: SQLServerProfile): void {
   if (profile.environment !== "test" && profile.environment !== "preproduction") {
     throw new ConnectorError("invalid_argument", "SQL Server environment is not supported");
   }
-  if (!fixedString(profile.profileId) || !fixedString(profile.server) || !fixedString(profile.database)) {
+  if (!isSourceProfileId(profile.profileId) || !fixedString(profile.server) || !fixedString(profile.database)) {
     throw new ConnectorError("invalid_argument", "SQL Server profile contains an invalid fixed value");
   }
   if (profile.instance !== undefined && !fixedString(profile.instance)) {

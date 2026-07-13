@@ -67,6 +67,23 @@ function fixturePayload(): ConnectorPrivatePayload {
 }
 
 describe("SQL Server profile schema", () => {
+  it("accepts the 128-character public profile ID boundary", () => {
+    const payload = fixturePayload();
+    payload.profile.profileId = `A${"b".repeat(127)}`;
+
+    expect(parseConnectorPrivatePayload(payload).profile.profileId).toBe(payload.profile.profileId);
+  });
+
+  it.each([
+    ["colon", "erp:test"],
+    ["129 characters", `A${"b".repeat(128)}`],
+  ])("rejects a public profile ID containing %s", (_name, profileId) => {
+    const payload = fixturePayload();
+    payload.profile.profileId = profileId;
+
+    expect(() => parseConnectorPrivatePayload(payload)).toThrowError("profileId");
+  });
+
   it("accepts an opaque credential ref", () => {
     expect(parseConnectorPrivatePayload(fixturePayload()).profile.credentialRef).toBe("erp-test-credential");
   });

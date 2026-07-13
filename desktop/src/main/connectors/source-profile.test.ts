@@ -56,6 +56,7 @@ describe("validateSQLServerProfile", () => {
     expect(() =>
       validateSQLServerProfile({
         ...fixtureProfile(),
+        profileId: `A${"b".repeat(127)}`,
         environment: "preproduction",
         port: 65_535,
         connectTimeoutMS: 30_000,
@@ -85,6 +86,8 @@ describe("validateSQLServerProfile", () => {
     ["long connect timeout", { connectTimeoutMS: 30_001 }],
     ["short query timeout", { queryTimeoutMS: 999 }],
     ["long query timeout", { queryTimeoutMS: 10_001 }],
+    ["profile ID containing a colon", { profileId: "erp:test" }],
+    ["129-character profile ID", { profileId: `A${"b".repeat(128)}` }],
     ["unsafe credential ref", { credentialRef: "credential://erp-test" }],
     ["profile ID and credential ref alias", { credentialRef: "erp-test" }],
   ])("rejects %s", (_name, override) => {
