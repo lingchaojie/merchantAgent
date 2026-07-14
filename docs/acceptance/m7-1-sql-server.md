@@ -432,6 +432,13 @@ export LLM_API_KEY='TEST-ONLY-KEY'
 go run ./cmd/agentd
 ```
 
+The mock projector seeds `u_sales1` as owner and `d_prod#member` as operator
+for the test-only `business_record:mock-corp-001/order/ORD-1001`. The mock
+configuration also grants the `orders` data domain to sales, planner, and
+manager roles. These are the record and domain authorizations used by the
+visible SQL fixture flow; production relationships and grants must come from
+the enterprise authorization source.
+
 ```powershell
 & "$Repo\desktop\dist\win-unpacked\merchantAgent.exe"
 ```

@@ -449,6 +449,29 @@ function projectRows(
   });
 }
 
+function snapshotMSSQLRows(recordset: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(recordset)) throw publicError("failed");
+  const indexedKeys = new Set<PropertyKey>([
+    "length",
+    ...Array.from({ length: recordset.length }, (_value, index) => String(index)),
+  ]);
+  for (const key of Reflect.ownKeys(recordset)) {
+    if (indexedKeys.has(key)) continue;
+    if (Object.getOwnPropertyDescriptor(recordset, key)?.enumerable !== false) {
+      throw publicError("failed");
+    }
+  }
+  const rows: unknown[] = [];
+  for (let index = 0; index < recordset.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(recordset, String(index));
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      throw publicError("failed");
+    }
+    rows.push(descriptor.value);
+  }
+  return strictJSONSnapshot(rows) as Record<string, unknown>[];
+}
+
 function projectSingleRow(
   recordset: unknown,
   projections: readonly SQLProjection[],
@@ -1195,8 +1218,8 @@ export class SQLServerAdapter {
       const result = await queryWithAbort(request, operation.sql, signal);
       if (!Array.isArray(result.recordset)) throw publicError("failed");
       if (result.recordset.length > operation.maxResults) throw publicError("source_rejected");
-      const raw = strictJSONSnapshot(result.recordset);
-      if (!Array.isArray(raw) || raw.some((row) => typeof row !== "object" || row === null || Array.isArray(row))) {
+      const raw = snapshotMSSQLRows(result.recordset);
+      if (raw.some((row) => typeof row !== "object" || row === null || Array.isArray(row))) {
         throw publicError("failed");
       }
       const encoded = canonicalJSONStringify(raw);

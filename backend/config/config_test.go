@@ -17,8 +17,8 @@ func TestOpen_Seeded(t *testing.T) {
 	s.db.QueryRow(`SELECT COUNT(*) FROM role_rules`).Scan(&rules)
 	s.db.QueryRow(`SELECT COUNT(*) FROM data_domains`).Scan(&domains)
 	s.db.QueryRow(`SELECT COUNT(*) FROM domain_grants`).Scan(&grants)
-	if roles != 7 || rules != 6 || domains != 2 || grants != 3 {
-		t.Fatalf("seed counts = roles %d rules %d domains %d grants %d; want 7/6/2/3", roles, rules, domains, grants)
+	if roles != 7 || rules != 6 || domains != 3 || grants != 6 {
+		t.Fatalf("seed counts = roles %d rules %d domains %d grants %d; want 7/6/3/6", roles, rules, domains, grants)
 	}
 }
 
@@ -84,15 +84,15 @@ func TestRulesReplaceAndDomains(t *testing.T) {
 		t.Fatal(err)
 	}
 	grants, _ := s.Grants(ctx)
-	if len(grants) != 4 {
-		t.Fatalf("grants = %d, want 4", len(grants))
+	if len(grants) != 7 {
+		t.Fatalf("grants = %d, want 7", len(grants))
 	}
 	if err := s.RemoveGrant(ctx, "cost", "role:mock-corp-001/finance#assignee"); err != nil {
 		t.Fatal(err)
 	}
 	grants, _ = s.Grants(ctx)
-	if len(grants) != 3 {
-		t.Fatalf("grants = %d, want 3 after remove", len(grants))
+	if len(grants) != 6 {
+		t.Fatalf("grants = %d, want 6 after remove", len(grants))
 	}
 }
 

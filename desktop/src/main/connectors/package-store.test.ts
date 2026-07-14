@@ -763,7 +763,7 @@ describe("WindowsACLProtector", () => {
           "C:\\Users\\alice\\connector.ma-connector",
           "/inheritance:r",
           "/grant:r",
-          "S-1-5-21-123-456-789-1001:(F)",
+          "*S-1-5-21-123-456-789-1001:(F)",
         ],
         options: { encoding: "utf8", windowsHide: true, shell: false },
       },

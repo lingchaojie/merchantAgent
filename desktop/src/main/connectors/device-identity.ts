@@ -71,7 +71,8 @@ export class WindowsACLProtector implements ACLProtector {
     if (!match) throw new Error("device_acl: current Windows SID could not be determined");
     this.execute(
       "icacls.exe",
-      [filePath, "/inheritance:r", "/grant:r", `${match[1]}:(F)`],
+      // icacls requires '*' to treat a numeric SID as a SID instead of an account name.
+      [filePath, "/inheritance:r", "/grant:r", `*${match[1]}:(F)`],
       { encoding: "utf8", windowsHide: true, shell: false },
     );
   }

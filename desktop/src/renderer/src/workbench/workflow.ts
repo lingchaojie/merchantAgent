@@ -38,7 +38,7 @@ export const DEFAULT_PROFILE: ProfileForm = {
 };
 
 export const DEFAULT_OPERATIONS: OperationForm = {
-  querySql: "SELECT o.order_id AS order_id, o.status AS status FROM dbo.production_orders o WHERE o.order_id = @orderId",
+  querySql: "SELECT TOP 10 o.order_id AS order_id, o.status AS status FROM dbo.production_orders o WHERE o.order_id = @orderId",
   beforeSql: "SELECT o.order_id AS order_id, o.work_order_id AS work_order_id, o.completion_rate AS completion_rate, o.note AS note, o.version AS version FROM dbo.production_orders o WHERE o.order_id = @orderId AND o.work_order_id = @workOrderId",
   updateSql: "UPDATE dbo.production_orders SET completion_rate = @completionRate, note = @note, version = @nextVersion WHERE order_id = @orderId AND work_order_id = @workOrderId AND version = @expectedVersion",
   readBackSql: "SELECT o.order_id AS order_id, o.work_order_id AS work_order_id, o.completion_rate AS completion_rate, o.note AS note, o.version AS version FROM dbo.production_orders o WHERE o.order_id = @orderId AND o.work_order_id = @workOrderId",

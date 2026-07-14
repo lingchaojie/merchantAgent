@@ -18,9 +18,13 @@ INSERT INTO role_rules (tenant_id, ord, match_terms, role_id) VALUES
 
 INSERT INTO data_domains (tenant_id, domain_id, label) VALUES
  ('mock-corp-001','cost','成本'),
- ('mock-corp-001','pricing','定价');
+ ('mock-corp-001','pricing','定价'),
+ ('mock-corp-001','orders','订单');
 
 INSERT INTO domain_grants (tenant_id, domain_id, subject) VALUES
  ('mock-corp-001','cost','user:u_fin'),
  ('mock-corp-001','cost','department:mock-corp-001/d_sales#manager'),
- ('mock-corp-001','cost','department:mock-corp-001/d_root#manager');
+ ('mock-corp-001','cost','department:mock-corp-001/d_root#manager'),
+ ('mock-corp-001','orders','role:mock-corp-001/sales#assignee'),
+ ('mock-corp-001','orders','role:mock-corp-001/planner#assignee'),
+ ('mock-corp-001','orders','role:mock-corp-001/manager_tier#assignee');

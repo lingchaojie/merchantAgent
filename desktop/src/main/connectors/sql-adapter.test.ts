@@ -125,6 +125,36 @@ describe("SQLServerAdapter.executeRead", () => {
     expect(pool.close).toHaveBeenCalledOnce();
   });
 
+  it("strips non-enumerable node-mssql recordset metadata before snapshotting raw rows", async () => {
+    const recordset = [{ order_id: "ORD-1001", order_status: "queued", internal_cost: 900 }];
+    Object.defineProperty(recordset, "columns", { value: { order_id: {} }, enumerable: false });
+    Object.defineProperty(recordset, "toTable", { value: () => undefined, enumerable: false });
+    const adapter = new SQLServerAdapter(
+      fixtureProfile(),
+      fakeVault(),
+      factoryFor(fakePool(fakeRequest({ recordset }))),
+    );
+
+    await expect(adapter.executeWorkbenchRead(fixtureReadOperation(), { orderId: "ORD-1001" }))
+      .resolves.toEqual({
+        raw: [{ order_id: "ORD-1001", order_status: "queued", internal_cost: 900 }],
+        projected: [{ orderId: "ORD-1001", status: "queued" }],
+      });
+  });
+
+  it("rejects enumerable recordset metadata instead of exposing it as raw data", async () => {
+    const recordset = [{ order_id: "ORD-1001", order_status: "queued" }];
+    Object.defineProperty(recordset, "unexpected", { value: "secret", enumerable: true });
+    const adapter = new SQLServerAdapter(
+      fixtureProfile(),
+      fakeVault(),
+      factoryFor(fakePool(fakeRequest({ recordset }))),
+    );
+
+    await expect(adapter.executeWorkbenchRead(fixtureReadOperation(), { orderId: "ORD-1001" }))
+      .rejects.toMatchObject({ code: "failed" });
+  });
+
   it("rejects a Workbench raw response above the byte ceiling and closes the pool", async () => {
     const request = fakeRequest({ recordset: [{
       order_id: "ORD-1001",

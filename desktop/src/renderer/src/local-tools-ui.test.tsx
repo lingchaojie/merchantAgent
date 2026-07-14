@@ -2,6 +2,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
 import { ResultCard } from "./components/ResultCard";
 
+it("omits fields that are not declared by a narrow connector result", () => {
+  const html = renderToStaticMarkup(
+    <ResultCard
+      tool="query_order_status"
+      data={{ orderId: "ORD-1001", status: "in_production" }}
+    />,
+  );
+
+  expect(html).toContain("ORD-1001");
+  expect(html).toContain("in_production");
+  expect(html).not.toContain("undefined");
+});
+
 it("renders a verified production progress result without execution internals", () => {
   const html = renderToStaticMarkup(
     <ResultCard

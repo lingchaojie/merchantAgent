@@ -192,6 +192,8 @@ describe("WorkbenchApp workflow", () => {
     expect(visible).toContain(`结果快照 · report_production_progress · ${fixture.drafts.at(-1)!.draftId}`);
     await click(fixture.renderer.root, "校验并冻结");
     const frozenDraft = fixture.drafts.at(-1)!;
+    const readOperation = frozenDraft.payload.operations.find((operation) => operation.kind === "read")!;
+    expect(readOperation.sql).toMatch(new RegExp(`^SELECT TOP ${readOperation.maxResults}\\b`, "i"));
     expect(frozenDraft.payload.checker.testsDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(frozenDraft.payload.checker.testsDigest).not.toBe(`sha256:${"0".repeat(64)}`);
     expect(button(fixture.renderer.root, "提交管理员审批").props.disabled).toBe(false);

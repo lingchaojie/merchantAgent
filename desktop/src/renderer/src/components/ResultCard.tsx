@@ -13,28 +13,37 @@ function Row({ k, v, accent }: { k: string; v: unknown; accent?: "green" | "red"
   );
 }
 
+function OptionalRow({ k, v, accent }: { k: string; v: unknown; accent?: "green" | "red" }) {
+  const visible = (typeof v === "string" && v.length > 0)
+    || (typeof v === "number" && Number.isFinite(v))
+    || typeof v === "boolean";
+  return visible ? <Row k={k} v={v} accent={accent} /> : null;
+}
+
 export function ResultCard({ tool, data }: { tool?: string; data?: Data }): JSX.Element | null {
   if (!tool || !data) return null;
 
   if (tool === "query_order_status") {
+    if (typeof data.orderId !== "string" || data.orderId.length === 0) return null;
     return (
       <div className="card">
         <div className="card-head"><IconBox width={14} height={14} /> 订单进度 · {String(data.orderId)}</div>
-        <Row k="客户" v={data.customer} />
-        <Row k="状态" v={data.status} />
-        <Row k="交期" v={data.promiseDate} />
+        <OptionalRow k="客户" v={data.customer} />
+        <OptionalRow k="状态" v={data.status} />
+        <OptionalRow k="交期" v={data.promiseDate} />
       </div>
     );
   }
 
   if (tool === "query_order_financials") {
+    if (typeof data.orderId !== "string" || data.orderId.length === 0) return null;
     const profit = Number(data.profit);
     return (
       <div className="card">
         <div className="card-head"><IconChart width={14} height={14} /> 订单财务 · {String(data.orderId)}</div>
-        <Row k="成本" v={data.cost} />
-        <Row k="售价" v={data.price} />
-        <Row k="利润" v={data.profit} accent={profit >= 0 ? "green" : "red"} />
+        <OptionalRow k="成本" v={data.cost} />
+        <OptionalRow k="售价" v={data.price} />
+        <OptionalRow k="利润" v={data.profit} accent={Number.isFinite(profit) && profit >= 0 ? "green" : "red"} />
       </div>
     );
   }
@@ -60,13 +69,14 @@ export function ResultCard({ tool, data }: { tool?: string; data?: Data }): JSX.
   }
 
   if (tool === "report_production_progress") {
+    if (typeof data.orderId !== "string" || data.orderId.length === 0) return null;
     return (
       <div className="card">
         <div className="card-head"><IconChart width={14} height={14} /> 生产进度 · {String(data.orderId)}</div>
         <div className="card-row"><span className="badge green">已验证</span></div>
-        <Row k="工单" v={data.workOrderId} />
-        <Row k="完成率" v={`${String(data.completionRate)}%`} accent="green" />
-        <Row k="备注" v={data.note || "-"} />
+        <OptionalRow k="工单" v={data.workOrderId} />
+        <OptionalRow k="完成率" v={typeof data.completionRate === "number" ? `${data.completionRate}%` : undefined} accent="green" />
+        <OptionalRow k="备注" v={data.note} />
       </div>
     );
   }

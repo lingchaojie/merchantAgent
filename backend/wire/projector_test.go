@@ -42,8 +42,11 @@ func TestDesired_MergesAndDedups(t *testing.T) {
 		"role:mock-corp-001/sales#assignee|usable_by|skill:mock-corp-001/order360",
 		"user:u_fin|viewer|data_domain:mock-corp-001/cost",
 		"tenant:mock-corp-001|tenant|role:mock-corp-001/finance",
+		"role:mock-corp-001/planner#assignee|viewer|data_domain:mock-corp-001/orders",
 		"user:u_sales1|owner|business_record:mock-corp-001/order/SO-1001",
 		"department:mock-corp-001/d_prod#member|operator|business_record:mock-corp-001/order/SO-1001",
+		"user:u_sales1|owner|business_record:mock-corp-001/order/ORD-1001",
+		"department:mock-corp-001/d_prod#member|operator|business_record:mock-corp-001/order/ORD-1001",
 	}
 	for _, m := range must {
 		if set[m] == 0 {
