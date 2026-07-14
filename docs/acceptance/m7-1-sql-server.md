@@ -17,12 +17,15 @@ Record those rows only from the visible Windows procedure.
 
 | Field | Value |
 | --- | --- |
-| Date/time and timezone | PENDING |
-| Tester | PENDING |
-| Commit (`git rev-parse HEAD`) | PENDING |
-| Windows version / WSL distribution | PENDING |
+| Date/time and timezone | `2026-07-14 20:38-21:10 +08:00` (`China Standard Time`) |
+| Tester | Codex controller; Alvin visible observer |
+| Commit (`git rev-parse HEAD`) | `ad20c48eeebc45995088daeaee253ed50597af1c` |
+| Windows version / WSL distribution | Windows 10 Pro `10.0.19045` / Ubuntu `24.04.1 LTS` on WSL2 |
+| PowerShell | Windows PowerShell `5.1.19041.4894` |
 | SQL image | `mcr.microsoft.com/mssql/server:2022-CU20-ubuntu-22.04` |
-| Desktop package path | PENDING |
+| LLM | Test-only local OpenAI-compatible loopback mock; removed during cleanup |
+| Desktop package path | `desktop\dist\win-unpacked\merchantAgent.exe` (removed during cleanup) |
+| Desktop package SHA-256 | `D739004B78566C3D6DC8368EFBA01C93337270A86BEA56D84A606CDF6052D41C` |
 
 Store sanitized screenshots and transcripts outside the repository. Never put
 credentials, private keys, SQL result rows, or Workbench SQL screenshots in a
@@ -30,8 +33,8 @@ shared issue, chat, backend log, or audit record.
 
 ## Prerequisites
 
-- Windows 11, WSL2, Docker Desktop with WSL integration, PowerShell 7, OpenSSL,
-  Go, and Node.js/npm.
+- Windows 10 or 11, WSL2, Docker Desktop with WSL integration, Windows
+  PowerShell 5.1 or PowerShell 7, OpenSSL, Go, and Node.js/npm.
 - A standard Windows test user and a separate local administrator. Run normal
   acceptance as the standard user.
 - A repository checkout at the commit recorded above. Keep acceptance secrets
@@ -74,6 +77,11 @@ function Invoke-NativeCapture {
 function Get-ConnectorStateManifest {
   param([Parameter(Mandatory)] [string] $Root)
   if (!(Test-Path -LiteralPath $Root -PathType Container)) { return @() }
+  $rootFullPath = [IO.Path]::GetFullPath($Root).TrimEnd(
+    [IO.Path]::DirectorySeparatorChar,
+    [IO.Path]::AltDirectorySeparatorChar
+  )
+  $rootPrefix = $rootFullPath + [IO.Path]::DirectorySeparatorChar
   $manifest = [Collections.Generic.List[object]]::new()
   $manifest.Add([pscustomobject]@{
     relativePath = '.'
@@ -86,9 +94,13 @@ function Get-ConnectorStateManifest {
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
       throw "Connector state contains an unsupported reparse point: $($item.FullName)"
     }
+    $itemFullPath = [IO.Path]::GetFullPath($item.FullName)
+    if (!$itemFullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+      throw "Connector state entry escaped the exact root: $($item.FullName)"
+    }
     $isDirectory = $item.PSIsContainer
     $manifest.Add([pscustomobject]@{
-      relativePath = [IO.Path]::GetRelativePath($Root, $item.FullName).Replace('\', '/')
+      relativePath = $itemFullPath.Substring($rootPrefix.Length).Replace('\', '/')
       kind = if ($isDirectory) { 'directory' } else { 'file' }
       length = if ($isDirectory) { $null } else { $item.Length }
       sha256 = if ($isDirectory) { $null } else { (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash }
@@ -321,8 +333,12 @@ if (Test-Path -LiteralPath $StatePurge) {
 }
 New-Item -ItemType Directory -Path $StateFilesBackup -Force | Out-Null
 $PreflightManifest = @(Get-ConnectorStateManifest -Root $ConnectorState)
-ConvertTo-Json -InputObject @($PreflightManifest) -Depth 4 |
-  Set-Content -LiteralPath $StateManifestPath -Encoding utf8NoBOM -ErrorAction Stop
+$PreflightManifestJson = ConvertTo-Json -InputObject @($PreflightManifest) -Depth 4
+[IO.File]::WriteAllText(
+  $StateManifestPath,
+  $PreflightManifestJson,
+  [Text.UTF8Encoding]::new($false)
+)
 foreach ($relativePath in $IsolationRelativePaths) {
   $state = @($PreflightManifest | Where-Object { $_.relativePath -eq $relativePath })
   if ($state.Count -gt 1) { throw "Duplicate preflight manifest path: $relativePath" }
@@ -494,16 +510,18 @@ credential and cannot retrieve the local implementation or credentials.
    app/backend restart; the tool must be unavailable and no SQL call may run.
 
 Inspect Windows Credential Manager target
-`com.merchantagent.connector/mock-corp-001/DEVICE_ID`, account
-`credential/erp-test-credential`. The app must never display its password.
+`com.merchantagent.connector/mock-corp-001/DEVICE_ID/credential/erp-test-credential`,
+account `credential/erp-test-credential`. The app must never display its
+password.
 
 ## 8. Visual and Raw-Result Acceptance
 
-Capture sanitized screenshots of the main desktop at 1000x720 and Workbench
-Profile/Operations/Tests/raw-result plus Admin Connectors at 900x700. Capture
-native confirmation before cancel and confirm. Verify no overlap, clipped
-controls, or horizontal page overflow. Screenshots must not expose SQL, rows,
-credentials, keys, or implementation credentials.
+Capture sanitized screenshots as `main-1000x720.png`,
+`workbench-900x700.png`, and `admin-900x700.png`. If native confirmation is
+captured, use `native-confirm-cancel-900x700.png` and
+`native-confirm-accept-900x700.png`. Verify no overlap, clipped controls, or
+horizontal page overflow. Screenshots must not expose SQL, rows, credentials,
+keys, or implementation credentials.
 
 Close the result, close Workbench, and restart the app. Prove raw rows are
 unrecoverable from Workbench, ordinary chat IPC, diagnostics, logs, package
@@ -615,7 +633,14 @@ $AcceptanceArtifacts = @(
   (Join-Path $Acceptance 'platform-private.pem'),
   (Join-Path $Acceptance 'platform-public.pem'),
   (Join-Path $Acceptance 'device-public.pem'),
-  $AcceptanceDeviceIdPath
+  (Join-Path $Acceptance 'main-1000x720.png'),
+  (Join-Path $Acceptance 'workbench-900x700.png'),
+  (Join-Path $Acceptance 'admin-900x700.png'),
+  (Join-Path $Acceptance 'native-confirm-cancel-900x700.png'),
+  (Join-Path $Acceptance 'native-confirm-accept-900x700.png'),
+  (Join-Path $Acceptance 'chromium.log'),
+  (Join-Path $Acceptance 'desktop-stdout.log'),
+  (Join-Path $Acceptance 'desktop-stderr.log')
 )
 $BackendComposeCleanup = @'
 set -euo pipefail
@@ -667,6 +692,18 @@ function New-CleanupStage {
     [Parameter(Mandatory)] [scriptblock] $Action
   )
   return [pscustomobject]@{ Name = $Name; Action = $Action }
+}
+function Test-CredentialListingContainsTarget {
+  param(
+    [Parameter(Mandatory)] [string] $Listing,
+    [Parameter(Mandatory)] [string] $Target
+  )
+  foreach ($line in @($Listing -split '\r?\n')) {
+    if ($line.Trim().EndsWith($Target, [StringComparison]::OrdinalIgnoreCase)) {
+      return $true
+    }
+  }
+  return $false
 }
 # BEGIN EXTRACTABLE VERIFIED BACKUP PURGE
 function Assert-VerifiedStateBackup {
@@ -828,7 +865,7 @@ $SafeCleanupStages = @(
     if ([string]::IsNullOrWhiteSpace($acceptanceDeviceId)) {
       throw 'Acceptance device identifier is empty.'
     }
-    $CleanupContext.CredentialTarget = "com.merchantagent.connector/mock-corp-001/$acceptanceDeviceId"
+    $CleanupContext.CredentialTarget = "com.merchantagent.connector/mock-corp-001/$acceptanceDeviceId/credential/erp-test-credential"
   }
   New-CleanupStage -Name 'Stop packaged application processes' -Action {
     Stop-PackagedApplicationProcesses
@@ -841,7 +878,9 @@ $SafeCleanupStages = @(
       throw 'Cannot list the exact Credential Manager target without the acceptance device ID.'
     }
     $credentialListing = Invoke-NativeCapture -FilePath 'cmdkey.exe' -ArgumentList @("/list:$($CleanupContext.CredentialTarget)") -FailureMessage 'Credential Manager pre-deletion listing failed.'
-    $CleanupContext.CredentialPresentBeforeDelete = $credentialListing -match [regex]::Escape($CleanupContext.CredentialTarget)
+    $CleanupContext.CredentialPresentBeforeDelete = Test-CredentialListingContainsTarget `
+      -Listing $credentialListing `
+      -Target $CleanupContext.CredentialTarget
     $CleanupContext.CredentialPreListCompleted = $true
   }
   New-CleanupStage -Name 'Delete exact Credential Manager target' -Action {
@@ -1004,15 +1043,6 @@ $SafeCleanupStages = @(
       throw "Acceptance artifact cleanup failed: $($artifactFailures -join '; ')"
     }
   }
-  New-CleanupStage -Name 'Remove empty acceptance temp directory' -Action {
-    if ((Test-Path -LiteralPath $Acceptance) -and
-        (Get-ChildItem -Force -LiteralPath $Acceptance | Measure-Object).Count -gt 0) {
-      throw "Unexpected acceptance temp artifact will be preserved under: $Acceptance"
-    }
-    if (Test-Path -LiteralPath $Acceptance) {
-      Remove-Item -LiteralPath $Acceptance -Force -ErrorAction Stop
-    }
-  }
 )
 
 $FinalCleanupStages = @(
@@ -1029,11 +1059,6 @@ $FinalCleanupStages = @(
     $remainingArtifacts = @($AcceptanceArtifacts | Where-Object { Test-Path -LiteralPath $_ })
     if ($remainingArtifacts.Count -gt 0) {
       throw "Acceptance artifact remains: $($remainingArtifacts -join ', ')"
-    }
-  }
-  New-CleanupStage -Name 'Verify acceptance temp directory' -Action {
-    if (Test-Path -LiteralPath $Acceptance) {
-      throw "Acceptance temp directory remains: $Acceptance"
     }
   }
   New-CleanupStage -Name 'Verify packaged application processes' -Action {
@@ -1065,7 +1090,7 @@ $FinalCleanupStages = @(
       throw 'Cannot verify the exact Credential Manager target without the acceptance device ID.'
     }
     $credentialListing = Invoke-NativeCapture -FilePath 'cmdkey.exe' -ArgumentList @("/list:$($CleanupContext.CredentialTarget)") -FailureMessage 'Credential Manager post-deletion listing failed.'
-    if ($credentialListing -match [regex]::Escape($CleanupContext.CredentialTarget)) {
+    if (Test-CredentialListingContainsTarget -Listing $credentialListing -Target $CleanupContext.CredentialTarget) {
       throw "Credential Manager target still exists: $($CleanupContext.CredentialTarget)"
     }
   }
@@ -1078,6 +1103,28 @@ $FinalCleanupStages = @(
     $scopedGitStatus = Invoke-NativeCapture -FilePath 'git.exe' -ArgumentList @('-C', $Repo, 'status', '--short', '--', 'desktop/resources/implementation/platform-public.pem', 'test/sqlserver') -FailureMessage 'Scoped acceptance Git verification failed.'
     if ($scopedGitStatus) {
       throw "Acceptance changed tracked platform-key or SQL-fixture files: $scopedGitStatus"
+    }
+  }
+  New-CleanupStage -Name 'Remove acceptance device identifier after final checks' -Action {
+    if ($CleanupErrors.Count -gt 0) { return }
+    if (Test-Path -LiteralPath $AcceptanceDeviceIdPath) {
+      Remove-Item -LiteralPath $AcceptanceDeviceIdPath -Force -ErrorAction Stop
+    }
+  }
+  New-CleanupStage -Name 'Remove empty acceptance temp directory after final checks' -Action {
+    if ($CleanupErrors.Count -gt 0) { return }
+    if ((Test-Path -LiteralPath $Acceptance) -and
+        (Get-ChildItem -Force -LiteralPath $Acceptance | Measure-Object).Count -gt 0) {
+      throw "Unexpected acceptance temp artifact will be preserved under: $Acceptance"
+    }
+    if (Test-Path -LiteralPath $Acceptance) {
+      Remove-Item -LiteralPath $Acceptance -Force -ErrorAction Stop
+    }
+  }
+  New-CleanupStage -Name 'Verify acceptance temp directory' -Action {
+    if ($CleanupErrors.Count -gt 0) { return }
+    if (Test-Path -LiteralPath $Acceptance) {
+      throw "Acceptance temp directory remains: $Acceptance"
     }
   }
 )
@@ -1166,25 +1213,27 @@ reported and preserved.
 
 ## Evidence Table
 
-Every row needs tester initials, timestamp, and sanitized artifact path. Never
-mark Windows-only rows from WSL automation.
+Every row needs tester identity, timestamp, and either a sanitized artifact path
+or a concise live-observation note. Step 9 removes its fixed temporary evidence
+files after the result is transcribed. Never mark Windows-only rows from WSL
+automation.
 
 | Check | Status | Artifact/notes |
 | --- | --- | --- |
-| Backend full gate | PENDING | |
-| Desktop tests/typechecks/build | PENDING | |
-| Real TLS/read/write/replay/conflict/recovery | PENDING | |
-| Submission/audit/chat/log/diagnostic leak scan | PENDING | |
-| DPAPI key and target-user ACL | PENDING WINDOWS | |
-| Credential Manager persistence/removal | PENDING WINDOWS | |
-| Workbench raw isolation after close/restart | PENDING WINDOWS | |
-| Gate A/B denial before desktop | PENDING WINDOWS | |
-| Gate C and native cancel/confirm | PENDING WINDOWS | |
-| Package/credential/ledger/approval restart persistence | PENDING WINDOWS | |
-| Suspend invalidates next turn without restart | PENDING WINDOWS | |
-| Implementer/admin authority separation | PENDING WINDOWS | |
-| 1000x720 desktop layout | PENDING WINDOWS | |
-| 900x700 Workbench/admin layout | PENDING WINDOWS | |
-| Device/package/ledger/credential/fixture/TLS/key cleanup or exact restoration | PENDING WINDOWS | |
+| Backend full gate | PASS | Codex, 2026-07-14: `go test ./...` passed. |
+| Desktop tests/typechecks/build | PASS | Codex, 2026-07-14: 543 passed, 2 opt-in SQL skips; typecheck and production build passed. |
+| Real TLS/read/write/replay/conflict/recovery | PASS | Codex, 2026-07-14: strict-TLS SQL Server gate 65/65; visible read, preview, cancel, confirmed write, and read-back passed. |
+| Submission/audit/chat/log/diagnostic leak scan | PASS | Codex, 2026-07-14: no SQL, source address, credential material, implementation credential, or raw row appeared on public surfaces. |
+| DPAPI key and target-user ACL | PASS | Codex, 2026-07-14: encrypted private-key envelope, stable device identity, no plaintext PEM, and target-user-only ACL verified in the packaged app. |
+| Credential Manager persistence/removal | PASS | Codex, 2026-07-14: credential persisted across restart; exact keytar target returned `* NONE *` after Step 9. |
+| Workbench raw isolation after close/restart | PASS | Codex, 2026-07-14: closed raw result could not reopen and was absent after Workbench/app restart and from ordinary IPC/diagnostics. |
+| Gate A/B denial before desktop | PASS | Codex, 2026-07-14: both denied before the desktop bridge; no SQL call or native confirmation occurred. |
+| Gate C and native cancel/confirm | PASS | Codex, 2026-07-14: cancel preserved completion 45/version 1; confirmation produced completion 60/version 2 with read-back. |
+| Package/credential/ledger/approval restart persistence | PASS | Codex, 2026-07-14: device, package, credential, execution ledger, and approval survived packaged-app restart. |
+| Suspend invalidates next turn without restart | PASS | Codex, 2026-07-14: the next turn returned tool unavailable immediately, with no SQL call or native dialog. |
+| Implementer/admin authority separation | PASS | Codex, 2026-07-14: implementer could not publish; admin saw only public metadata and could not access local SQL/configuration/credentials. |
+| 1000x720 desktop layout | PASS | Codex, 2026-07-14: temporary `main-1000x720.png` visibly inspected; no overlap or horizontal overflow; removed by Step 9. |
+| 900x700 Workbench/admin layout | PASS | Codex, 2026-07-14: temporary Workbench/admin captures visibly inspected; no overlap or horizontal overflow; removed by Step 9. |
+| Device/package/ledger/credential/fixture/TLS/key cleanup or exact restoration | PASS | Codex, 2026-07-14 21:10 +08:00: `Final cleanup verification passed`; empty preflight manifest restored, then both backup paths purged; independent residual scan passed. |
 
 Final result is PASS only when every row is PASS against the recorded commit.

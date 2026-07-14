@@ -371,7 +371,10 @@ describe("M7.1 Windows acceptance runbook", () => {
 
   it("snapshots and restores the complete connector directory without deleting unrelated state", () => {
     expect(runbook).toContain("function Get-ConnectorStateManifest");
-    expect(runbook).toContain("[IO.Path]::GetRelativePath");
+    expect(runbook).toContain("$itemFullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)");
+    expect(runbook).toContain("$itemFullPath.Substring($rootPrefix.Length)");
+    expect(runbook).not.toContain("[IO.Path]::GetRelativePath");
+    expect(runbook).not.toContain("-Encoding utf8NoBOM");
     expect(runbook).toContain("Get-FileHash -Algorithm SHA256");
     expect(runbook).toContain("Get-Acl -LiteralPath");
     expect(runbook).toContain("Backup hash differs before isolation");
@@ -381,6 +384,27 @@ describe("M7.1 Windows acceptance runbook", () => {
     expect(runbook).toContain("Compare-Object");
     expect(runbook).toContain("Complete preflight connector-state snapshot restored");
     expect(runbook).not.toContain("Remove every file under $ConnectorState");
+  });
+
+  it("targets the exact keytar credential and removes fixed acceptance evidence files", () => {
+    expect(cleanupBlock).toContain(
+      '"com.merchantagent.connector/mock-corp-001/$acceptanceDeviceId/credential/erp-test-credential"',
+    );
+    for (const artifact of [
+      "main-1000x720.png",
+      "workbench-900x700.png",
+      "admin-900x700.png",
+      "chromium.log",
+      "desktop-stdout.log",
+      "desktop-stderr.log",
+    ]) expect(cleanupBlock).toContain(`Join-Path $Acceptance '${artifact}'`);
+    expect(cleanupBlock).toContain("function Test-CredentialListingContainsTarget");
+    expect(cleanupBlock).toContain(
+      "$line.Trim().EndsWith($Target, [StringComparison]::OrdinalIgnoreCase)",
+    );
+    expect(cleanupBlock).not.toContain(
+      "$credentialListing -match [regex]::Escape($CleanupContext.CredentialTarget)",
+    );
   });
 
   it("defines independently aggregated safe and final cleanup stages", () => {
@@ -414,7 +438,24 @@ describe("M7.1 Windows acceptance runbook", () => {
       "List and verify Credential Manager target after deletion",
       "Verify acceptance package",
       "Verify scoped Git state",
+      "Remove acceptance device identifier after final checks",
+      "Remove empty acceptance temp directory after final checks",
     ]) expect(finalCleanupStageNames).toContain(stage);
+    const credentialVerification = cleanupBlock.indexOf(
+      "New-CleanupStage -Name 'List and verify Credential Manager target after deletion'",
+    );
+    const deviceIdRemoval = cleanupBlock.indexOf(
+      "New-CleanupStage -Name 'Remove acceptance device identifier after final checks'",
+    );
+    const tempDirectoryVerification = cleanupBlock.indexOf(
+      "New-CleanupStage -Name 'Verify acceptance temp directory'",
+    );
+    expect(deviceIdRemoval).toBeGreaterThan(credentialVerification);
+    expect(tempDirectoryVerification).toBeGreaterThan(deviceIdRemoval);
+    expect(cleanupBlock.slice(
+      cleanupBlock.indexOf("$AcceptanceArtifacts = @("),
+      cleanupBlock.indexOf("$BackendComposeCleanup = @'"),
+    )).not.toContain("$AcceptanceDeviceIdPath");
     expect(cleanupBlock).not.toContain("$GeneratedResourceCleanup");
     expect(cleanupBlock).not.toContain("$GeneratedResourceVerification");
   });
@@ -519,7 +560,7 @@ describe("M7.1 Windows acceptance runbook", () => {
   });
 
   it("reports restoration backups separately from post-restore purge remnants and gates the sole PASS marker", () => {
-    expect(runbook.match(/Final cleanup verification passed/g)).toHaveLength(1);
+    expect(cleanupBlock.match(/Final cleanup verification passed/g)).toHaveLength(1);
     expect(verifiedBackupPurge).toContain("[IO.Directory]::Move($sourceFullPath, $destinationFullPath)");
     expect(verifiedBackupPurge).not.toContain("Test-Path -LiteralPath $Destination");
     expect(verifiedBackupPurge).toMatch(/function Remove-VerifiedStateBackupQuarantine[\s\S]*?Assert-VerifiedStateBackup[\s\S]*?Remove-Item -LiteralPath \$Root -Recurse/);
